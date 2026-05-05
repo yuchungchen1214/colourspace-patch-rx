@@ -26,7 +26,7 @@ ColourSpace Patch Rx receives and displays patch data over the network, supporti
 ### Applications
 
 **macOS**
-- Apple Silicon (M1 / M2 / M3): `mac-arm.dmg`
+- Apple Silicon: `mac-arm.dmg`
 - Intel: `mac-intel.dmg`
 
 **Windows**
