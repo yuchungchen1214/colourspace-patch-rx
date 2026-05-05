@@ -41,7 +41,6 @@ ColourSpace Patch Rx receives and displays patch data over the network, supporti
 ## Notes
 
 - First official GitHub release (v2.0.0)
-- Previous versions were distributed privately
 - On first use, your system may require additional permissions or network settings to be adjusted for the app to receive data.
 
 ---
