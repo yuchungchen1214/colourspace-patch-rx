@@ -6,7 +6,7 @@ ColourSpace Patch Rx allows you to receive and display patch data over the netwo
 
 ---
 
-## Screenshot
+## Preview
 
 <img src="assets/demo-v2.0.0.png" width="800">
 
@@ -50,7 +50,6 @@ ColourSpace Patch Rx allows you to receive and display patch data over the netwo
 
 - First official GitHub release (v2.0.0)  
 - Previous versions were distributed privately  
-- ICC embedded images are not supported in user patterns  
 
 ---
 
