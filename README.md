@@ -27,29 +27,26 @@ ColourSpace Patch Rx allows you to receive and display patch data over the netwo
 
 👉 [Download from Releases](https://github.com/yuchungchen1214/colourspace-patch-rx/releases)
 
-### macOS
+### Applications
+
+**macOS**
 - Apple Silicon (M1 / M2 / M3): mac-arm.dmg  
 - Intel: mac-intel.dmg  
 
-### Windows
-- exe
+**Windows**
+- exe  
 
----
+### Documentation
 
-## Quick Start
-
-1. Launch the application  
-2. In ColourSpace, go to **Hardware Options → Network Server**  
-3. Note the IP address and port  
-4. Enter the same IP and port in Patch Rx  
-5. Once connected, patch data will be displayed in real time  
+- Manual.pdf (usage instructions)
 
 ---
 
 ## Notes
 
 - First official GitHub release (v2.0.0)  
-- Previous versions were distributed privately  
+- Previous versions were distributed privately
+- On first use, your system may require additional permissions or network settings to be adjusted for the app to receive data.
 
 ---
 
