@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+
+# venv
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+dist-macos-intel/
+*.spec
+
+# macOS
+.DS_Store
+
+# App / dmg
+*.app
+*.dmg
+
+# ignore personal / dev stuff
+tools/
+src/archive
+
+# ignore build scripts
+build.sh
+build-dmg-intel.sh
+ColourSpace Patch Rx.spec
+README.md
+assets other
+build other
+manual other
+manual
+release
+.idea/
