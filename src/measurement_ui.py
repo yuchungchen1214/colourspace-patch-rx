@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -84,6 +84,7 @@ class CorrectionDialog(QDialog):
         self.setWindowTitle("Correction")
         self.resize(720, 650)
         self._run_index = -1
+        self._output_folder_dialog = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -238,14 +239,31 @@ class CorrectionDialog(QDialog):
         return page
 
     def _choose_output(self):
-        path = QFileDialog.getExistingDirectory(
-            self,
-            "Choose Output Folder",
-            self.output_path.text(),
-            QFileDialog.Option.ShowDirsOnly,
-        )
-        if path:
-            self.output_path.setText(path)
+        if self._output_folder_dialog is not None:
+            self._output_folder_dialog.raise_()
+            self._output_folder_dialog.activateWindow()
+            return
+
+        dialog = QFileDialog(self, "Choose Output Folder", self.output_path.text())
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.fileSelected.connect(self.output_path.setText)
+        dialog.finished.connect(self._output_folder_finished)
+        self._output_folder_dialog = dialog
+        dialog.open()
+
+    def _output_folder_finished(self, _result):
+        dialog = self._output_folder_dialog
+        self._output_folder_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
+        QTimer.singleShot(0, self._restore_after_output_folder)
+
+    def _restore_after_output_folder(self):
+        if self.isVisible():
+            self.raise_()
+            self.activateWindow()
 
     def _start_preview(self):
         if not any(check.isChecked() for check in self.instrument_checks):
@@ -437,22 +455,29 @@ class ManualMeasurementDialog(QDialog):
         measure.clicked.connect(self._add_preview_reading)
 
     def _add_preview_reading(self):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        values = (
-            row + 1,
-            "20:15:32",
-            "45.7231",
-            "48.0000",
-            "52.2814",
-            "0.312700",
-            "0.329000",
-            self.instrument.currentText(),
-            "Preview",
+        selected_text = self.instrument.currentText()
+        if selected_text == "All connected instruments":
+            instruments = [item[0] for item in PREVIEW_INSTRUMENTS]
+        else:
+            instruments = [selected_text]
+
+        preview_values = (
+            ("45.7231", "48.0000", "52.2814", "0.312700", "0.329000"),
+            ("44.1768", "46.3200", "50.4102", "0.313418", "0.328742"),
         )
-        for column, value in enumerate(values):
-            self.table.setItem(row, column, QTableWidgetItem(str(value)))
-        self.measure_status.setText("Preview reading added. External target was not changed.")
+        time_text = QTime.currentTime().toString("HH:mm:ss")
+        for index, instrument in enumerate(instruments):
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            xyzxy = preview_values[index % len(preview_values)]
+            values = (row + 1, time_text, *xyzxy, instrument, "Preview")
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QTableWidgetItem(str(value)))
+
+        count = len(instruments)
+        self.measure_status.setText(
+            f"{count} preview reading{'s' if count != 1 else ''} added. External target was not changed."
+        )
 
     def _delete_selected(self):
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
