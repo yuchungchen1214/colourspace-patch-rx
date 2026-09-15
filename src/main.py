@@ -2111,6 +2111,8 @@ class MainWindow(QMainWindow):
         self.manual_measurement_controller.instrument_identified.connect(
             self.measurement_environment.update_identifier
         )
+        self._measurement_owner = None
+        self._correction_state = None
 
         self.viewer_windows = {}
         self._build_menu(show_status=show_status)
@@ -3549,6 +3551,9 @@ class MainWindow(QMainWindow):
         if self.correction_dialog is None:
             self.correction_dialog = CorrectionDialog()
             self.correction_dialog.patch_requested.connect(self._show_measurement_patch)
+            self.correction_dialog.measurement_requested.connect(self._start_correction_measurement)
+            self.correction_dialog.continue_requested.connect(self.manual_measurement_controller.continue_current)
+            self.correction_dialog.cancel_requested.connect(self.manual_measurement_controller.cancel_current)
             self.correction_dialog.set_scan_callback(self._rescan_measurement_environment)
             self.correction_dialog.finished.connect(self._schedule_measurement_session_release)
         self.correction_dialog.set_instruments(self.measurement_environment.instruments)
@@ -3586,7 +3591,9 @@ class MainWindow(QMainWindow):
         self.manual_measurement_dialog.activateWindow()
 
     def _start_manual_measurement(self, instruments):
+        self._measurement_owner = "manual"
         if not self.manual_measurement_controller.measure(instruments):
+            self._measurement_owner = None
             QMessageBox.warning(
                 self.manual_measurement_dialog,
                 "Measurement Unavailable",
@@ -3594,39 +3601,94 @@ class MainWindow(QMainWindow):
             )
 
     def _on_manual_measurement_started(self, count):
-        if self.manual_measurement_dialog is not None:
+        if self._measurement_owner == "manual" and self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.set_busy(True, count)
 
     def _on_manual_calibration_required(self, instrument):
-        if self.manual_measurement_dialog is None:
+        dialog = self.correction_dialog if self._measurement_owner == "correction" else self.manual_measurement_dialog
+        if dialog is None:
             self.manual_measurement_controller.cancel_current()
             return
-        self.manual_measurement_dialog.show_action_prompt(
+        dialog.show_action_prompt(
             "Instrument Calibration",
             f"Set {instrument.name} to its calibration position, then click Continue.",
         )
 
     def _on_manual_measurement_position_required(self, instrument):
-        if self.manual_measurement_dialog is None:
+        dialog = self.correction_dialog if self._measurement_owner == "correction" else self.manual_measurement_dialog
+        if dialog is None:
             self.manual_measurement_controller.cancel_current()
             return
-        self.manual_measurement_dialog.show_action_prompt(
+        dialog.show_action_prompt(
             "Measurement Position",
             f"Return {instrument.name} to its measurement position and aim it at the target, then click Continue.",
         )
 
     def _on_manual_reading_ready(self, instrument, reading):
-        if self.manual_measurement_dialog is not None:
+        if self._measurement_owner == "correction" and self.correction_dialog is not None:
+            state = self._correction_state
+            self.correction_dialog.add_reading(state["colours"][state["colour_index"]], state["repetition"], instrument, reading)
+        elif self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.add_reading(instrument, reading)
 
     def _on_manual_measurement_error(self, instrument, message):
-        if self.manual_measurement_dialog is not None:
+        if self._measurement_owner == "correction" and self.correction_dialog is not None:
+            state = self._correction_state
+            self.correction_dialog.add_error(state["colours"][state["colour_index"]], state["repetition"], instrument, message)
+        elif self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.add_error(instrument, message)
 
     def _on_manual_measurement_finished(self):
+        if self._measurement_owner == "correction":
+            self._advance_correction_measurement()
+            return
         if self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.measurement_finished()
+        self._measurement_owner = None
         self._schedule_measurement_session_release()
+
+    def _start_correction_measurement(self, config):
+        if self.manual_measurement_controller.busy:
+            QMessageBox.information(self.correction_dialog, "Measurement in Progress", "Finish the current measurement first.")
+            return
+        self._measurement_owner = "correction"
+        self._correction_state = dict(config, colour_index=0, repetition=1)
+        self.correction_dialog.begin_measurement(config["colours"])
+        self._begin_correction_patch()
+
+    def _begin_correction_patch(self):
+        state = self._correction_state
+        colour = state["colours"][state["colour_index"]]
+        level = state["level"]
+        rgb = {"R": (level, 0, 0), "G": (0, level, 0), "B": (0, 0, level), "W": (level, level, level)}[colour]
+        self.correction_dialog.begin_patch(colour, state["repetition"], state["repetitions"])
+        self._show_measurement_patch(*rgb, f"Correction {colour}")
+        QTimer.singleShot(500, lambda: self.manual_measurement_controller.measure(state["instruments"]))
+
+    def _advance_correction_measurement(self):
+        state = self._correction_state
+        if state is None:
+            return
+        if self.manual_measurement_controller.cancelled:
+            self.correction_dialog.finish_real_measurement()
+            self._measurement_owner = None
+            self._correction_state = None
+            return
+        colour = state["colours"][state["colour_index"]]
+        if state["repetition"] < state["repetitions"]:
+            state["repetition"] += 1
+            self.correction_dialog.begin_patch(colour, state["repetition"], state["repetitions"])
+            QTimer.singleShot(100, lambda: self.manual_measurement_controller.measure(state["instruments"]))
+            return
+        self.correction_dialog.finish_real_patch(colour)
+        state["colour_index"] += 1
+        state["repetition"] = 1
+        if state["colour_index"] < len(state["colours"]):
+            self._begin_correction_patch()
+        else:
+            self.correction_dialog.finish_real_measurement()
+            self._measurement_owner = None
+            self._correction_state = None
 
     def _schedule_measurement_session_release(self, _result=None):
         QTimer.singleShot(0, self._release_measurement_sessions_if_unused)

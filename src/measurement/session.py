@@ -222,6 +222,10 @@ class ManualMeasurementController(QObject):
     def busy(self):
         return self._busy
 
+    @property
+    def cancelled(self):
+        return self._cancelled
+
     def measure(self, instruments):
         if self._busy or not instruments:
             return False

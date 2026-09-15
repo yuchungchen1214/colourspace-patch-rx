@@ -83,6 +83,9 @@ def _clear_layout(layout):
 
 class CorrectionDialog(QDialog):
     patch_requested = Signal(int, int, int, str)
+    measurement_requested = Signal(object)
+    continue_requested = Signal()
+    cancel_requested = Signal()
 
     PATCHES = (
         ("R", (242, 0, 0)),
@@ -96,6 +99,7 @@ class CorrectionDialog(QDialog):
         self.setWindowTitle("Correction")
         self.resize(720, 650)
         self._run_index = -1
+        self._records = []
         self._output_folder_dialog = None
 
         layout = QVBoxLayout(self)
@@ -122,9 +126,23 @@ class CorrectionDialog(QDialog):
         layout.addWidget(tabs, 1)
         self.tabs = tabs
 
-        self.status_label = QLabel("Ready — UI preview; no instrument is being accessed.")
+        self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("color: #888;")
         layout.addWidget(self.status_label)
+
+        self.action_frame = QFrame()
+        self.action_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        action_layout = QVBoxLayout(self.action_frame)
+        self.action_title = _heading("")
+        self.action_message = QLabel()
+        self.action_message.setWordWrap(True)
+        self.action_cancel = QPushButton("Cancel")
+        self.action_continue = QPushButton("Continue")
+        action_layout.addWidget(self.action_title)
+        action_layout.addWidget(self.action_message)
+        action_layout.addLayout(_button_row(self.action_cancel, self.action_continue))
+        self.action_frame.hide()
+        layout.addWidget(self.action_frame)
 
         self.start_button = QPushButton("Start RGBW")
         self.start_button.setDefault(True)
@@ -136,6 +154,8 @@ class CorrectionDialog(QDialog):
 
         self.clear_button.clicked.connect(self._clear_results)
         self.start_button.clicked.connect(self._start_preview)
+        self.action_continue.clicked.connect(self._continue_action)
+        self.action_cancel.clicked.connect(self._cancel_action)
         self.save_button.clicked.connect(self._show_preview_notice)
         close_button.clicked.connect(self.close)
 
@@ -291,59 +311,89 @@ class CorrectionDialog(QDialog):
             self.activateWindow()
 
     def _start_preview(self):
+        self._request_real_measurement([name for name, _rgb in self.PATCHES])
+
+    def _request_real_measurement(self, colours):
         if not any(check.isChecked() for check in self.instrument_checks):
             QMessageBox.warning(self, "No Instrument", "Select at least one instrument.")
             return
-        self._run_index = 0
+        instruments = [check.instrument_info for check in self.instrument_checks if check.isChecked()]
+        self.measurement_requested.emit({
+            "instruments": instruments,
+            "colours": list(colours),
+            "repetitions": self.readings_spin.value(),
+            "level": self.level_spin.value(),
+        })
+
+    def begin_measurement(self, colours):
+        self._records = [record for record in self._records if record[0] not in colours]
         self.start_button.setEnabled(False)
         self.clear_button.setEnabled(False)
         self.tabs.setCurrentIndex(1)
-        self._run_next_patch()
 
-    def _run_next_patch(self):
-        if self._run_index >= len(self.PATCHES):
-            self.start_button.setEnabled(True)
-            self.clear_button.setEnabled(True)
-            self.start_button.setText("Run RGBW Again")
-            self.save_button.setEnabled(True)
-            self.status_label.setText("Preview RGBW session complete. Review Results before saving.")
-            self.tabs.setCurrentIndex(2)
-            self._populate_preview_results()
-            return
-        name, rgb = self.PATCHES[self._run_index]
-        status, _ = self.patch_rows[name]
-        status.setText("Displaying patch…")
-        self.status_label.setText(f"Measuring {name} — preview")
-        self.patch_requested.emit(*rgb, f"Measurement {name}")
-        QTimer.singleShot(550, lambda: self._finish_patch(name))
-
-    def _finish_patch(self, name: str):
-        status, button = self.patch_rows[name]
-        status.setText("3 readings complete")
-        status.setStyleSheet("")
-        button.setText("Remeasure")
-        self._run_index += 1
-        QTimer.singleShot(250, self._run_next_patch)
+    def begin_patch(self, name, repetition, total):
+        status, _button = self.patch_rows[name]
+        status.setText(f"Measuring {repetition}/{total}…")
+        self.status_label.setText(f"Measuring {name} — {repetition}/{total}")
 
     def _measure_one(self, name: str, rgb):
+        self._request_real_measurement([name])
+
+    def add_reading(self, colour, sample, instrument, reading):
+        self._records.append((colour, sample, instrument, reading, ""))
+
+    def add_error(self, colour, sample, instrument, message):
+        self._records.append((colour, sample, instrument, None, message))
+
+    def finish_real_patch(self, name):
         status, button = self.patch_rows[name]
-        status.setText("Displaying patch…")
-        self.tabs.setCurrentIndex(1)
-        self.status_label.setText(f"Measuring {name} — preview")
-        self.patch_requested.emit(*rgb, f"Measurement {name}")
+        count = sum(1 for colour, _sample, _instrument, reading, _error in self._records if colour == name and reading)
+        status.setText(f"{count} readings complete")
+        status.setStyleSheet("")
+        button.setText("Remeasure")
 
-        def finish():
-            status.setText("3 readings complete")
-            status.setStyleSheet("")
-            button.setText("Remeasure")
-            self.save_button.setEnabled(True)
-            self.status_label.setText(f"{name} preview measurement complete.")
-            self._populate_preview_results()
+    def finish_real_measurement(self):
+        self.start_button.setEnabled(True)
+        self.clear_button.setEnabled(True)
+        self.start_button.setText("Run RGBW Again")
+        self.save_button.setEnabled(bool(self._records))
+        self.status_label.setText("Measurement complete. Review Results before saving.")
+        self._render_real_results()
+        self.tabs.setCurrentIndex(2)
 
-        QTimer.singleShot(550, finish)
+    def _render_real_results(self):
+        groups = {}
+        for colour, _sample, instrument, reading, error in self._records:
+            groups.setdefault((_instrument_label(instrument), colour), []).append((reading, error))
+        self.results_table.setRowCount(len(groups))
+        for row, ((instrument, colour), values) in enumerate(groups.items()):
+            valid = [reading for reading, _error in values if reading is not None]
+            if valid:
+                Y = sum(value.Y for value in valid) / len(valid)
+                x = sum(value.x for value in valid) / len(valid)
+                y = sum(value.y for value in valid) / len(valid)
+                cells = (instrument, colour, f"{Y:.6f}", f"{x:.6f}", f"{y:.6f}", f"{len(valid)} readings")
+            else:
+                cells = (instrument, colour, "", "", "", "Error")
+            for column, value in enumerate(cells):
+                self.results_table.setItem(row, column, QTableWidgetItem(value))
+
+    def show_action_prompt(self, title, message):
+        self.action_title.setText(title)
+        self.action_message.setText(message)
+        self.action_frame.show()
+
+    def _continue_action(self):
+        self.action_frame.hide()
+        self.continue_requested.emit()
+
+    def _cancel_action(self):
+        self.action_frame.hide()
+        self.cancel_requested.emit()
 
     def _clear_results(self):
         self._run_index = -1
+        self._records.clear()
         self.results_table.clearContents()
         self.results_table.setRowCount(0)
         for status, button in self.patch_rows.values():
@@ -353,25 +403,7 @@ class CorrectionDialog(QDialog):
         self.start_button.setText("Start RGBW")
         self.start_button.setEnabled(True)
         self.save_button.setEnabled(False)
-        self.status_label.setText("Ready — UI preview; no instrument is being accessed.")
-
-    def _populate_preview_results(self):
-        preview = {
-            "R": (25.56, .6740, .3157),
-            "G": (83.08, .3036, .6536),
-            "B": (9.56, .1506, .0652),
-            "W": (117.20, .3230, .3343),
-        }
-        row = 0
-        selected = [check.instrument_info for check in self.instrument_checks if check.isChecked()]
-        self.results_table.setRowCount(len(selected) * 4)
-        for instrument_index, instrument in enumerate(selected):
-            for patch, values in preview.items():
-                scale = 1.0 - instrument_index * .035
-                cells = (_instrument_label(instrument), patch, f"{values[0] * scale:.4f}", f"{values[1]:.6f}", f"{values[2]:.6f}", "Preview")
-                for column, value in enumerate(cells):
-                    self.results_table.setItem(row, column, QTableWidgetItem(value))
-                row += 1
+        self.status_label.setText("Ready")
 
     def _show_preview_notice(self):
         QMessageBox.information(
@@ -463,6 +495,7 @@ class ManualMeasurementDialog(QDialog):
         self.instrument.setEnabled(False)
         self._instruments = []
         self._records = []
+        self._csv_dialog = None
         self._display_mode = "Yxy"
         setup_form.addRow("Instrument", self.instrument)
         layout.addWidget(setup)
@@ -671,9 +704,19 @@ class ManualMeasurementDialog(QDialog):
             QMessageBox.information(self, "No Measurements", "There are no readings to save.")
             return
         default_name = f"manual_measurements_{datetime.now():%Y%m%d_%H%M}.csv"
-        path, _ = QFileDialog.getSaveFileName(self, "Save Measurements", default_name, "CSV Files (*.csv)")
-        if not path:
+        if self._csv_dialog is not None:
+            self._csv_dialog.raise_()
             return
+        dialog = QFileDialog(self, "Save Measurements", default_name, "CSV Files (*.csv)")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setDefaultSuffix("csv")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.fileSelected.connect(self._write_csv)
+        dialog.finished.connect(self._csv_dialog_finished)
+        self._csv_dialog = dialog
+        dialog.open()
+
+    def _write_csv(self, path):
         if not path.lower().endswith(".csv"):
             path += ".csv"
         with open(path, "w", newline="", encoding="utf-8-sig") as handle:
@@ -685,3 +728,15 @@ class ManualMeasurementDialog(QDialog):
                     for column in range(self.table.columnCount())
                 )
         self.measure_status.setText(f"Saved {self.table.rowCount()} reading(s)")
+
+    def _csv_dialog_finished(self, _result):
+        dialog = self._csv_dialog
+        self._csv_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
+        QTimer.singleShot(0, self._restore_after_csv_dialog)
+
+    def _restore_after_csv_dialog(self):
+        if self.isVisible():
+            self.raise_()
+            self.activateWindow()
