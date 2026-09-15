@@ -115,11 +115,13 @@ class CorrectionDialog(QDialog):
 
         self.start_button = QPushButton("Start RGBW")
         self.start_button.setDefault(True)
+        self.clear_button = QPushButton("Clear")
         self.save_button = QPushButton("Save Results…")
         self.save_button.setEnabled(False)
         close_button = QPushButton("Close")
-        layout.addLayout(_button_row(self.start_button, self.save_button, close_button))
+        layout.addLayout(_button_row(self.clear_button, self.start_button, self.save_button, close_button))
 
+        self.clear_button.clicked.connect(self._clear_results)
         self.start_button.clicked.connect(self._start_preview)
         self.save_button.clicked.connect(self._show_preview_notice)
         close_button.clicked.connect(self.close)
@@ -236,9 +238,14 @@ class CorrectionDialog(QDialog):
         return page
 
     def _choose_output(self):
-        path = QFileDialog.getExistingDirectory(self, "Choose Output Folder")
-        if path:
-            self.output_path.setText(path)
+        dialog = QFileDialog(self, "Choose Output Folder", self.output_path.text())
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            paths = dialog.selectedFiles()
+            if paths:
+                self.output_path.setText(paths[0])
 
     def _start_preview(self):
         if not any(check.isChecked() for check in self.instrument_checks):
@@ -246,12 +253,14 @@ class CorrectionDialog(QDialog):
             return
         self._run_index = 0
         self.start_button.setEnabled(False)
+        self.clear_button.setEnabled(False)
         self.tabs.setCurrentIndex(1)
         self._run_next_patch()
 
     def _run_next_patch(self):
         if self._run_index >= len(self.PATCHES):
             self.start_button.setEnabled(True)
+            self.clear_button.setEnabled(True)
             self.start_button.setText("Run RGBW Again")
             self.save_button.setEnabled(True)
             self.status_label.setText("Preview RGBW session complete. Review Results before saving.")
@@ -289,6 +298,20 @@ class CorrectionDialog(QDialog):
             self._populate_preview_results()
 
         QTimer.singleShot(550, finish)
+
+    def _clear_results(self):
+        self._run_index = -1
+        self.results_table.clearContents()
+        self.results_table.setRowCount(0)
+        for status, button in self.patch_rows.values():
+            status.setText("Not measured")
+            status.setStyleSheet("color: #888;")
+            button.setText("Measure")
+        self.start_button.setText("Start RGBW")
+        self.start_button.setEnabled(True)
+        self.save_button.setEnabled(False)
+        self.status_label.setText("Ready — UI preview; no instrument is being accessed.")
+        self.tabs.setCurrentIndex(0)
 
     def _populate_preview_results(self):
         preview = {
@@ -346,20 +369,26 @@ class ReportDialog(QDialog):
         preview = QFrame()
         preview.setFrameShape(QFrame.Shape.StyledPanel)
         preview_layout = QVBoxLayout(preview)
-        preview_title = QLabel("No report yet")
-        preview_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview_title.setStyleSheet("color: #888;")
+        self.preview_title = QLabel("No report yet")
+        self.preview_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_title.setStyleSheet("color: #888;")
         preview_layout.addStretch()
-        preview_layout.addWidget(preview_title)
+        preview_layout.addWidget(self.preview_title)
         preview_layout.addStretch()
         layout.addWidget(preview, 1)
         start = QPushButton("Start Report")
-        export = QPushButton("Export…")
-        export.setEnabled(False)
+        self.clear_button = QPushButton("Clear")
+        self.export_button = QPushButton("Export…")
+        self.export_button.setEnabled(False)
         close = QPushButton("Close")
         start.clicked.connect(lambda: QMessageBox.information(self, "UI Preview", "The report measurement engine is not connected yet."))
+        self.clear_button.clicked.connect(self._clear_report)
         close.clicked.connect(self.close)
-        layout.addLayout(_button_row(start, export, close))
+        layout.addLayout(_button_row(self.clear_button, start, self.export_button, close))
+
+    def _clear_report(self):
+        self.preview_title.setText("No report yet")
+        self.export_button.setEnabled(False)
 
 
 class ManualMeasurementDialog(QDialog):
@@ -402,7 +431,7 @@ class ManualMeasurementDialog(QDialog):
         save = QPushButton("Save CSV…")
         close = QPushButton("Close")
         delete.clicked.connect(self._delete_selected)
-        clear.clicked.connect(lambda: self.table.setRowCount(0))
+        clear.clicked.connect(self._clear_readings)
         save.clicked.connect(lambda: QMessageBox.information(self, "UI Preview", "CSV export is not connected yet."))
         close.clicked.connect(self.close)
         layout.addLayout(_button_row(delete, clear, save, close))
@@ -430,3 +459,7 @@ class ManualMeasurementDialog(QDialog):
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
         for row in rows:
             self.table.removeRow(row)
+
+    def _clear_readings(self):
+        self.table.setRowCount(0)
+        self.measure_status.setText("Ready — UI preview")

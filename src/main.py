@@ -3455,7 +3455,7 @@ class MainWindow(QMainWindow):
 
     def open_correction_dialog(self):
         if self.correction_dialog is None:
-            self.correction_dialog = CorrectionDialog(self)
+            self.correction_dialog = CorrectionDialog()
             self.correction_dialog.patch_requested.connect(self._show_measurement_patch)
         self.correction_dialog.show()
         self.correction_dialog.raise_()
@@ -3463,7 +3463,7 @@ class MainWindow(QMainWindow):
 
     def open_report_dialog(self):
         if self.report_dialog is None:
-            self.report_dialog = ReportDialog(self)
+            self.report_dialog = ReportDialog()
             self.report_dialog.patch_requested.connect(self._show_measurement_patch)
         self.report_dialog.show()
         self.report_dialog.raise_()
@@ -3471,7 +3471,7 @@ class MainWindow(QMainWindow):
 
     def open_manual_measurement_dialog(self):
         if self.manual_measurement_dialog is None:
-            self.manual_measurement_dialog = ManualMeasurementDialog(self)
+            self.manual_measurement_dialog = ManualMeasurementDialog()
         self.manual_measurement_dialog.show()
         self.manual_measurement_dialog.raise_()
         self.manual_measurement_dialog.activateWindow()
@@ -4217,6 +4217,13 @@ class MainWindow(QMainWindow):
         self.logger.log("[SYSTEM] MainWindow closed")
 
         self.close_all_viewers()
+        for dialog in (
+                self.correction_dialog,
+                self.report_dialog,
+                self.manual_measurement_dialog,
+        ):
+            if dialog is not None:
+                dialog.close()
         self.connection_manager.stop()
 
         if hasattr(self, "bridge_server"):
