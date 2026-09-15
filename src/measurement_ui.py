@@ -311,7 +311,6 @@ class CorrectionDialog(QDialog):
         self.start_button.setEnabled(True)
         self.save_button.setEnabled(False)
         self.status_label.setText("Ready — UI preview; no instrument is being accessed.")
-        self.tabs.setCurrentIndex(0)
 
     def _populate_preview_results(self):
         preview = {

@@ -3450,7 +3450,15 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, title, message)
 
     def _show_measurement_patch(self, r, g, b, label):
-        self.set_test_pattern_solid(r, g, b, label)
+        # Measurement-generated patches use the existing Local Custom Color state.
+        # Keep the panel values aligned without moving keyboard focus away from
+        # the independent measurement control window.
+        self.custom_color_panel.hide()
+        self.custom_color_panel.set_rgb(r, g, b)
+        self.settings.setValue(SETTINGS_KEY_CUSTOM_R, r)
+        self.settings.setValue(SETTINGS_KEY_CUSTOM_G, g)
+        self.settings.setValue(SETTINGS_KEY_CUSTOM_B, b)
+        self.set_test_pattern_solid(r, g, b, f"Custom RGB=({r}, {g}, {b})")
         self.logger.log(f"[MEASUREMENT PREVIEW] {label}: RGB=({r},{g},{b})")
 
     def open_correction_dialog(self):
