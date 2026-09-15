@@ -3565,6 +3565,12 @@ class MainWindow(QMainWindow):
         if self.manual_measurement_dialog is None:
             self.manual_measurement_dialog = ManualMeasurementDialog()
             self.manual_measurement_dialog.measurement_requested.connect(self._start_manual_measurement)
+            self.manual_measurement_dialog.continue_requested.connect(
+                self.manual_measurement_controller.continue_current
+            )
+            self.manual_measurement_dialog.cancel_requested.connect(
+                self.manual_measurement_controller.cancel_current
+            )
             self.manual_measurement_dialog.finished.connect(self._schedule_measurement_session_release)
         self.manual_measurement_dialog.set_instruments(self.measurement_environment.instruments)
         self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
@@ -3584,29 +3590,22 @@ class MainWindow(QMainWindow):
         if self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.set_busy(True, count)
 
-    def _manual_measurement_prompt(self, title, message):
-        result = QMessageBox.question(
-            self.manual_measurement_dialog,
-            title,
-            message,
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
-        )
-        if result == QMessageBox.StandardButton.Ok:
-            self.manual_measurement_controller.continue_current()
-        else:
-            self.manual_measurement_controller.cancel_current()
-
     def _on_manual_calibration_required(self, instrument):
-        self._manual_measurement_prompt(
+        if self.manual_measurement_dialog is None:
+            self.manual_measurement_controller.cancel_current()
+            return
+        self.manual_measurement_dialog.show_action_prompt(
             "Instrument Calibration",
-            f"Set {instrument.name} to its calibration position, then click OK.",
+            f"Set {instrument.name} to its calibration position, then click Continue.",
         )
 
     def _on_manual_measurement_position_required(self, instrument):
-        self._manual_measurement_prompt(
+        if self.manual_measurement_dialog is None:
+            self.manual_measurement_controller.cancel_current()
+            return
+        self.manual_measurement_dialog.show_action_prompt(
             "Measurement Position",
-            f"Return {instrument.name} to its measurement position and aim it at the target, then click OK.",
+            f"Return {instrument.name} to its measurement position and aim it at the target, then click Continue.",
         )
 
     def _on_manual_reading_ready(self, instrument, reading):

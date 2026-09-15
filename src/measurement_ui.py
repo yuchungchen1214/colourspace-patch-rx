@@ -443,6 +443,8 @@ class ReportDialog(QDialog):
 
 class ManualMeasurementDialog(QDialog):
     measurement_requested = Signal(object)
+    continue_requested = Signal()
+    cancel_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -471,6 +473,22 @@ class ManualMeasurementDialog(QDialog):
         measure_row.addWidget(self.measure_button)
         layout.addLayout(measure_row)
 
+        self.action_frame = QFrame()
+        self.action_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        action_layout = QVBoxLayout(self.action_frame)
+        action_layout.setContentsMargins(12, 10, 12, 10)
+        self.action_title = _heading("")
+        self.action_message = QLabel()
+        self.action_message.setWordWrap(True)
+        self.action_cancel = QPushButton("Cancel")
+        self.action_continue = QPushButton("Continue")
+        self.action_continue.setDefault(True)
+        action_layout.addWidget(self.action_title)
+        action_layout.addWidget(self.action_message)
+        action_layout.addLayout(_button_row(self.action_cancel, self.action_continue))
+        self.action_frame.hide()
+        layout.addWidget(self.action_frame)
+
         self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(("#", "Time", "X", "Y", "Z", "x", "y", "Instrument", "Status"))
         self.table.verticalHeader().setVisible(False)
@@ -490,6 +508,8 @@ class ManualMeasurementDialog(QDialog):
         close.clicked.connect(self.close)
         layout.addLayout(_button_row(delete, clear, save, close))
         self.measure_button.clicked.connect(self._request_measurement)
+        self.action_continue.clicked.connect(self._continue_action)
+        self.action_cancel.clicked.connect(self._cancel_action)
 
     def _request_measurement(self):
         if not self._instruments:
@@ -507,7 +527,27 @@ class ManualMeasurementDialog(QDialog):
         if busy:
             self.measure_status.setText(f"Measuring {count} instrument(s)…")
 
+    def show_action_prompt(self, title: str, message: str):
+        self.action_title.setText(title)
+        self.action_message.setText(message)
+        self.action_frame.show()
+        self.action_continue.setFocus()
+
+    def hide_action_prompt(self):
+        self.action_frame.hide()
+
+    def _continue_action(self):
+        self.hide_action_prompt()
+        self.measure_status.setText("Continuing…")
+        self.continue_requested.emit()
+
+    def _cancel_action(self):
+        self.hide_action_prompt()
+        self.measure_status.setText("Cancelling…")
+        self.cancel_requested.emit()
+
     def add_reading(self, instrument, reading):
+        self.hide_action_prompt()
         row = self.table.rowCount()
         self.table.insertRow(row)
         values = (
@@ -526,6 +566,7 @@ class ManualMeasurementDialog(QDialog):
         self.measure_status.setText(f"Reading received from {instrument.name}")
 
     def add_error(self, instrument, message: str):
+        self.hide_action_prompt()
         row = self.table.rowCount()
         self.table.insertRow(row)
         values = (
@@ -539,6 +580,7 @@ class ManualMeasurementDialog(QDialog):
             self.table.setItem(row, column, QTableWidgetItem(str(value)))
 
     def measurement_finished(self):
+        self.hide_action_prompt()
         self.set_busy(False)
         self.measure_status.setText("Ready")
 
