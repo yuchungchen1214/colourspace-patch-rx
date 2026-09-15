@@ -41,9 +41,40 @@ def _is_i1d3(device: InstrumentInfo) -> bool:
     return text.startswith("hid") or "displaypro" in text or "display pro" in text
 
 
+def _safe_identifier(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+
+
+def extract_instrument_identifier(text: str) -> str:
+    clean = text.replace("\r", "").replace("\x00", "")
+    decoded_chunks = []
+    for payload in re.findall(r"got\s+'((?:[0-9a-fA-F]{2}\s+){8,}[0-9a-fA-F]{2})'", clean):
+        try:
+            decoded_chunks.append(bytes.fromhex(payload).decode("latin-1", errors="ignore"))
+        except ValueError:
+            pass
+    searchable = clean + "\n" + "\n".join(decoded_chunks)
+    matches = re.findall(
+        r"(?<![A-Za-z0-9])([A-Z0-9]{2,8}-\d{2}\.[A-Z0-9]{1,4}-\d{2}\.\d{4,}\.\d{2})(?![A-Za-z0-9])",
+        searchable,
+        re.I,
+    )
+    if matches:
+        return _safe_identifier(matches[-1].upper())
+    for pattern in (
+        r"serial number\s*[:=]?\s*([A-Za-z0-9._-]+)",
+        r"production no\.?\s*[:=]?\s*([A-Za-z0-9._-]+)",
+        r"HW ID\s*[:=]?\s*([A-Za-z0-9._-]+)",
+    ):
+        matches = re.findall(pattern, searchable, re.I)
+        if matches:
+            return _safe_identifier(matches[-1])
+    return ""
+
+
 class SpotreadSession:
     def __init__(self, spotread: Path, device: InstrumentInfo):
-        command = [str(spotread), "-c", str(device.port), "-e", "-x"]
+        command = [str(spotread), "-c", str(device.port), "-e", "-x", "-D", "9"]
         if _is_i1d3(device):
             command.extend(("-Y", "A"))
         self.text = ""
@@ -172,6 +203,7 @@ class ManualMeasurementController(QObject):
     measurement_error = Signal(object, str)
     finished = Signal()
     preparation_finished = Signal()
+    instrument_identified = Signal(object, str)
 
     def __init__(self, environment, logger, parent=None):
         super().__init__(parent)
@@ -226,6 +258,9 @@ class ManualMeasurementController(QObject):
         session = SpotreadSession(self.environment.info.spotread, instrument)
         try:
             state = session.wait_state(20.0)
+            identifier = extract_instrument_identifier(session.text)
+            if identifier and identifier != instrument.identifier:
+                self.instrument_identified.emit(instrument, identifier)
             if warmup and state == "ready" and _is_i1d3(instrument):
                 session.measure(25.0)  # Discard one background reading to warm the meter.
             with self._pool_lock:

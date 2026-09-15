@@ -2096,6 +2096,7 @@ class MainWindow(QMainWindow):
         self.measurement_environment = ArgyllEnvironment(self.settings, self.logger, self)
         self.measurement_environment.scan_started.connect(self._on_argyll_scan_started)
         self.measurement_environment.scan_finished.connect(self._on_argyll_scan_finished)
+        self.measurement_environment.instruments_changed.connect(self._update_measurement_instrument_ui)
         self.manual_measurement_controller = ManualMeasurementController(
             self.measurement_environment, self.logger, self
         )
@@ -2107,6 +2108,9 @@ class MainWindow(QMainWindow):
         self.manual_measurement_controller.reading_ready.connect(self._on_manual_reading_ready)
         self.manual_measurement_controller.measurement_error.connect(self._on_manual_measurement_error)
         self.manual_measurement_controller.finished.connect(self._on_manual_measurement_finished)
+        self.manual_measurement_controller.instrument_identified.connect(
+            self.measurement_environment.update_identifier
+        )
 
         self.viewer_windows = {}
         self._build_menu(show_status=show_status)
@@ -3457,6 +3461,9 @@ class MainWindow(QMainWindow):
             version = f" {info.version}" if info.version else ""
             self.argyll_status_action.setText(f"Status: ArgyllCMS{version} — Ready")
 
+        self._update_measurement_instrument_ui(instruments)
+
+    def _update_measurement_instrument_ui(self, instruments):
         for action in self.measurement_instrument_actions:
             self.instruments_menu.removeAction(action)
             action.deleteLater()

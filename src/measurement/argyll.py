@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -137,6 +137,7 @@ def _parse_instruments(output: str) -> list[InstrumentInfo]:
 class ArgyllEnvironment(QObject):
     scan_started = Signal()
     scan_finished = Signal(object, object)
+    instruments_changed = Signal(object)
 
     def __init__(self, settings, logger, parent=None):
         super().__init__(parent)
@@ -158,6 +159,19 @@ class ArgyllEnvironment(QObject):
     def set_spotread(self, path: Path):
         self.settings.setValue(SETTINGS_KEY_ARGYLL_SPOTREAD, str(path))
         self.scan()
+
+    def update_identifier(self, instrument: InstrumentInfo, identifier: str):
+        updated = []
+        changed = False
+        for current in self.instruments:
+            if current.port == instrument.port and current.path == instrument.path:
+                if current.identifier != identifier:
+                    current = replace(current, identifier=identifier)
+                    changed = True
+            updated.append(current)
+        if changed:
+            self.instruments = updated
+            self.instruments_changed.emit(updated)
 
     def _scan_worker(self, force_auto: bool):
         try:
