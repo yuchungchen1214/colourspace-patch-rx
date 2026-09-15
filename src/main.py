@@ -3375,7 +3375,7 @@ class MainWindow(QMainWindow):
         argyll_menu.addSeparator()
 
         self.locate_argyll_action = QAction("Locate Automatically", self)
-        self.locate_argyll_action.triggered.connect(lambda: self.measurement_environment.scan(force_auto=True))
+        self.locate_argyll_action.triggered.connect(lambda: self._rescan_measurement_environment(True))
         argyll_menu.addAction(self.locate_argyll_action)
 
         select_argyll_action = QAction("Select Installation…", self)
@@ -3398,7 +3398,7 @@ class MainWindow(QMainWindow):
 
         self.instruments_menu = measurement_menu.addMenu("Instruments")
         self.scan_instruments_action = QAction("Scan Again", self)
-        self.scan_instruments_action.triggered.connect(self.measurement_environment.scan)
+        self.scan_instruments_action.triggered.connect(self._rescan_measurement_environment)
         self.instruments_menu.addAction(self.scan_instruments_action)
 
         connected_instruments_action = QAction("Connected Instruments…", self)
@@ -3483,6 +3483,17 @@ class MainWindow(QMainWindow):
             if dialog is not None:
                 dialog.set_instruments(instruments)
 
+    def _rescan_measurement_environment(self, force_auto=False):
+        if self.manual_measurement_controller.busy:
+            QMessageBox.information(
+                self,
+                "Measurement in Progress",
+                "Finish the current measurement before scanning instruments again.",
+            )
+            return
+        self.manual_measurement_controller.release_sessions()
+        self.measurement_environment.scan(force_auto=bool(force_auto))
+
     def _select_argyll_installation(self):
         current = self.measurement_environment.info.spotread
         initial = str(current.parent if current else Path.home())
@@ -3493,6 +3504,7 @@ class MainWindow(QMainWindow):
             "spotread (spotread spotread.exe);;All Files (*)",
         )
         if executable:
+            self.manual_measurement_controller.release_sessions()
             self.measurement_environment.set_spotread(Path(executable))
 
     def _reveal_argyll_installation(self):
@@ -3530,8 +3542,10 @@ class MainWindow(QMainWindow):
         if self.correction_dialog is None:
             self.correction_dialog = CorrectionDialog()
             self.correction_dialog.patch_requested.connect(self._show_measurement_patch)
-            self.correction_dialog.set_scan_callback(self.measurement_environment.scan)
+            self.correction_dialog.set_scan_callback(self._rescan_measurement_environment)
+            self.correction_dialog.finished.connect(self._schedule_measurement_session_release)
         self.correction_dialog.set_instruments(self.measurement_environment.instruments)
+        self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
         self.correction_dialog.show()
         self.correction_dialog.raise_()
         self.correction_dialog.activateWindow()
@@ -3540,7 +3554,9 @@ class MainWindow(QMainWindow):
         if self.report_dialog is None:
             self.report_dialog = ReportDialog()
             self.report_dialog.patch_requested.connect(self._show_measurement_patch)
+            self.report_dialog.finished.connect(self._schedule_measurement_session_release)
         self.report_dialog.set_instruments(self.measurement_environment.instruments)
+        self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
         self.report_dialog.show()
         self.report_dialog.raise_()
         self.report_dialog.activateWindow()
@@ -3549,7 +3565,9 @@ class MainWindow(QMainWindow):
         if self.manual_measurement_dialog is None:
             self.manual_measurement_dialog = ManualMeasurementDialog()
             self.manual_measurement_dialog.measurement_requested.connect(self._start_manual_measurement)
+            self.manual_measurement_dialog.finished.connect(self._schedule_measurement_session_release)
         self.manual_measurement_dialog.set_instruments(self.measurement_environment.instruments)
+        self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
         self.manual_measurement_dialog.show()
         self.manual_measurement_dialog.raise_()
         self.manual_measurement_dialog.activateWindow()
@@ -3602,6 +3620,21 @@ class MainWindow(QMainWindow):
     def _on_manual_measurement_finished(self):
         if self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.measurement_finished()
+        self._schedule_measurement_session_release()
+
+    def _schedule_measurement_session_release(self, _result=None):
+        QTimer.singleShot(0, self._release_measurement_sessions_if_unused)
+
+    def _release_measurement_sessions_if_unused(self):
+        if self.manual_measurement_controller.busy:
+            return
+        dialogs = (
+            self.correction_dialog,
+            self.report_dialog,
+            self.manual_measurement_dialog,
+        )
+        if not any(dialog is not None and dialog.isVisible() for dialog in dialogs):
+            self.manual_measurement_controller.release_sessions()
 
     def open_settings_dialog(self):
         dc_host = self.settings.value(SETTINGS_KEY_DISPLAYCAL_HOST, DEFAULT_DISPLAYCAL_HOST)
@@ -4351,6 +4384,7 @@ class MainWindow(QMainWindow):
         ):
             if dialog is not None:
                 dialog.close()
+        self.manual_measurement_controller.release_sessions()
         self.connection_manager.stop()
 
         if hasattr(self, "bridge_server"):

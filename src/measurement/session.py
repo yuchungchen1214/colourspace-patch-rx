@@ -171,6 +171,7 @@ class ManualMeasurementController(QObject):
     reading_ready = Signal(object, object)
     measurement_error = Signal(object, str)
     finished = Signal()
+    preparation_finished = Signal()
 
     def __init__(self, environment, logger, parent=None):
         super().__init__(parent)
@@ -179,6 +180,11 @@ class ManualMeasurementController(QObject):
         self._busy = False
         self._continue_event = threading.Event()
         self._cancelled = False
+        self._sessions = {}
+        self._states = {}
+        self._session_locks = {}
+        self._pool_lock = threading.Lock()
+        self._generation = 0
 
     @property
     def busy(self):
@@ -195,6 +201,78 @@ class ManualMeasurementController(QObject):
         threading.Thread(target=self._worker, args=(list(instruments),), daemon=True).start()
         return True
 
+    @staticmethod
+    def _device_key(instrument):
+        return instrument.port, instrument.path
+
+    def prepare(self, instruments):
+        if self.environment.info.spotread is None:
+            return
+        threading.Thread(target=self._prepare_worker, args=(list(instruments),), daemon=True).start()
+
+    def _lock_for(self, instrument):
+        key = self._device_key(instrument)
+        with self._pool_lock:
+            return self._session_locks.setdefault(key, threading.Lock())
+
+    def _ensure_session(self, instrument, warmup=False):
+        key = self._device_key(instrument)
+        with self._pool_lock:
+            existing = self._sessions.get(key)
+            state = self._states.get(key)
+        if existing is not None:
+            return existing, state
+
+        session = SpotreadSession(self.environment.info.spotread, instrument)
+        try:
+            state = session.wait_state(20.0)
+            if warmup and state == "ready" and _is_i1d3(instrument):
+                session.measure(25.0)  # Discard one background reading to warm the meter.
+            with self._pool_lock:
+                self._sessions[key] = session
+                self._states[key] = state
+            return session, state
+        except Exception:
+            session.close()
+            raise
+
+    def _prepare_worker(self, instruments):
+        with self._pool_lock:
+            generation = self._generation
+        threads = []
+        for instrument in instruments:
+            def prepare_one(item=instrument):
+                lock = self._lock_for(item)
+                with lock:
+                    try:
+                        self._ensure_session(item, warmup=True)
+                        with self._pool_lock:
+                            stale = generation != self._generation
+                            stale_session = self._sessions.pop(self._device_key(item), None) if stale else None
+                            if stale:
+                                self._states.pop(self._device_key(item), None)
+                        if stale_session is not None:
+                            stale_session.close()
+                            return
+                        self.logger.log(f"[MEASUREMENT] background ready: {item.name}")
+                    except Exception as exc:
+                        self.logger.log(f"[MEASUREMENT] background preparation deferred for {item.name}: {exc}")
+            thread = threading.Thread(target=prepare_one, daemon=True)
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+        self.preparation_finished.emit()
+
+    def release_sessions(self):
+        with self._pool_lock:
+            self._generation += 1
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+            self._states.clear()
+        for session in sessions:
+            session.close()
+
     def continue_current(self):
         self._continue_event.set()
 
@@ -209,34 +287,39 @@ class ManualMeasurementController(QObject):
             raise RuntimeError("Measurement cancelled")
 
     def _worker(self, instruments):
-        spotread = self.environment.info.spotread
         try:
             for instrument in instruments:
                 if self._cancelled:
                     break
+                key = self._device_key(instrument)
                 session = None
+                lock = self._lock_for(instrument)
                 try:
-                    session = SpotreadSession(spotread, instrument)
-                    state = session.wait_state(20.0)
-                    if state == "calibration":
-                        self.calibration_required.emit(instrument)
-                        self._wait_for_user()
-                        session.trigger()
-                        session.wait_state(12.0, allow_calibration=False)
-                        self.measurement_position_required.emit(instrument)
-                        self._wait_for_user()
-                    reading = session.measure(25.0)
-                    self.reading_ready.emit(instrument, reading)
-                    self.logger.log(
-                        f"[MEASUREMENT] {instrument.name}: X={reading.X:.6f} "
-                        f"Y={reading.Y:.6f} Z={reading.Z:.6f} x={reading.x:.6f} y={reading.y:.6f}"
-                    )
+                    with lock:
+                        session, state = self._ensure_session(instrument)
+                        if state == "calibration":
+                            self.calibration_required.emit(instrument)
+                            self._wait_for_user()
+                            session.trigger()
+                            session.wait_state(12.0, allow_calibration=False)
+                            with self._pool_lock:
+                                self._states[key] = "ready"
+                            self.measurement_position_required.emit(instrument)
+                            self._wait_for_user()
+                        reading = session.measure(25.0)
+                        self.reading_ready.emit(instrument, reading)
+                        self.logger.log(
+                            f"[MEASUREMENT] {instrument.name}: X={reading.X:.6f} "
+                            f"Y={reading.Y:.6f} Z={reading.Z:.6f} x={reading.x:.6f} y={reading.y:.6f}"
+                        )
                 except Exception as exc:
                     self.measurement_error.emit(instrument, str(exc))
                     self.logger.log(f"[MEASUREMENT ERROR] {instrument.name}: {exc}")
-                finally:
                     if session is not None:
                         session.close()
+                    with self._pool_lock:
+                        self._sessions.pop(key, None)
+                        self._states.pop(key, None)
         finally:
             self._busy = False
             self.finished.emit()
