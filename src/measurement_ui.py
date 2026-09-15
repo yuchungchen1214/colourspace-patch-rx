@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -461,6 +462,8 @@ class ManualMeasurementDialog(QDialog):
         self.instrument = _combo(("Scanning instruments…",))
         self.instrument.setEnabled(False)
         self._instruments = []
+        self._records = []
+        self._display_mode = "Yxy"
         setup_form.addRow("Instrument", self.instrument)
         layout.addWidget(setup)
 
@@ -489,14 +492,29 @@ class ManualMeasurementDialog(QDialog):
         self.action_frame.hide()
         layout.addWidget(self.action_frame)
 
-        self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(("#", "Time", "X", "Y", "Z", "x", "y", "Instrument", "Status"))
+        display_row = QHBoxLayout()
+        display_row.addWidget(QLabel("Display"))
+        self.display_mode_group = QButtonGroup(self)
+        self.display_mode_group.setExclusive(True)
+        for mode in ("Yxy", "Yuv", "XYZ", "RGB8", "RGB"):
+            button = QPushButton(mode)
+            button.setCheckable(True)
+            button.setChecked(mode == self._display_mode)
+            button.setFixedWidth(58)
+            button.clicked.connect(lambda _checked=False, value=mode: self._set_display_mode(value))
+            self.display_mode_group.addButton(button)
+            display_row.addWidget(button)
+        display_row.addStretch()
+        self.correct_check = QCheckBox("Correct")
+        self.correct_check.setToolTip("Correction processing is not connected yet.")
+        self.correct_check.toggled.connect(self._correct_toggled)
+        display_row.addWidget(self.correct_check)
+        layout.addLayout(display_row)
+
+        self.table = QTableWidget(0, 7)
         self.table.verticalHeader().setVisible(False)
-        for column in range(7):
-            self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table, 1)
+        self._render_records()
 
         delete = QPushButton("Delete Selected")
         clear = QPushButton("Clear")
@@ -548,36 +566,24 @@ class ManualMeasurementDialog(QDialog):
 
     def add_reading(self, instrument, reading):
         self.hide_action_prompt()
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        values = (
-            row + 1,
-            QTime.currentTime().toString("HH:mm:ss"),
-            f"{reading.X:.6f}",
-            f"{reading.Y:.6f}",
-            f"{reading.Z:.6f}",
-            f"{reading.x:.6f}",
-            f"{reading.y:.6f}",
-            _instrument_label(instrument),
-            "Measured",
-        )
-        for column, value in enumerate(values):
-            self.table.setItem(row, column, QTableWidgetItem(str(value)))
+        self._records.append({
+            "time": QTime.currentTime().toString("HH:mm:ss"),
+            "instrument": instrument,
+            "reading": reading,
+            "status": "Measured",
+        })
+        self._render_records()
         self.measure_status.setText(f"Reading received from {instrument.name}")
 
     def add_error(self, instrument, message: str):
         self.hide_action_prompt()
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        values = (
-            row + 1,
-            QTime.currentTime().toString("HH:mm:ss"),
-            "", "", "", "", "",
-            _instrument_label(instrument),
-            f"Error: {message}",
-        )
-        for column, value in enumerate(values):
-            self.table.setItem(row, column, QTableWidgetItem(str(value)))
+        self._records.append({
+            "time": QTime.currentTime().toString("HH:mm:ss"),
+            "instrument": instrument,
+            "reading": None,
+            "status": f"Error: {message}",
+        })
+        self._render_records()
 
     def measurement_finished(self):
         self.hide_action_prompt()
@@ -602,11 +608,67 @@ class ManualMeasurementDialog(QDialog):
     def _delete_selected(self):
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
         for row in rows:
-            self.table.removeRow(row)
+            if 0 <= row < len(self._records):
+                self._records.pop(row)
+        self._render_records()
 
     def _clear_readings(self):
-        self.table.setRowCount(0)
+        self._records.clear()
+        self._render_records()
         self.measure_status.setText("Ready")
+
+    def _set_display_mode(self, mode: str):
+        self._display_mode = mode
+        self._render_records()
+
+    def _correct_toggled(self, checked: bool):
+        state = "on" if checked else "off"
+        self.measure_status.setText(f"Correct: {state} — processing is not connected yet")
+
+    def _render_records(self):
+        value_headers = {
+            "Yxy": ("Y", "x", "y"),
+            "Yuv": ("Y", "u′", "v′"),
+            "XYZ": ("X", "Y", "Z"),
+            "RGB8": ("R8", "G8", "B8"),
+            "RGB": ("R", "G", "B"),
+        }[self._display_mode]
+        headers = ("#", "Time", *value_headers, "Instrument", "Status")
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(self._records))
+        for row, record in enumerate(self._records):
+            reading = record["reading"]
+            if reading is None:
+                values = ("", "", "")
+            elif self._display_mode == "Yxy":
+                values = (f"{reading.Y:.6f}", f"{reading.x:.6f}", f"{reading.y:.6f}")
+            elif self._display_mode == "XYZ":
+                values = (f"{reading.X:.6f}", f"{reading.Y:.6f}", f"{reading.Z:.6f}")
+            elif self._display_mode == "Yuv":
+                denominator = reading.X + 15 * reading.Y + 3 * reading.Z
+                if denominator:
+                    values = (
+                        f"{reading.Y:.6f}",
+                        f"{4 * reading.X / denominator:.6f}",
+                        f"{9 * reading.Y / denominator:.6f}",
+                    )
+                else:
+                    values = (f"{reading.Y:.6f}", "0.000000", "0.000000")
+            else:
+                values = ("—", "—", "—")
+            cells = (
+                row + 1,
+                record["time"],
+                *values,
+                _instrument_label(record["instrument"]),
+                record["status"],
+            )
+            for column, value in enumerate(cells):
+                self.table.setItem(row, column, QTableWidgetItem(str(value)))
+        for column in range(len(headers)):
+            mode = QHeaderView.ResizeMode.Stretch if column == len(headers) - 2 else QHeaderView.ResizeMode.ResizeToContents
+            self.table.horizontalHeader().setSectionResizeMode(column, mode)
 
     def _save_csv(self):
         if self.table.rowCount() == 0:
