@@ -3472,7 +3472,6 @@ class MainWindow(QMainWindow):
     def open_manual_measurement_dialog(self):
         if self.manual_measurement_dialog is None:
             self.manual_measurement_dialog = ManualMeasurementDialog(self)
-            self.manual_measurement_dialog.patch_requested.connect(self._show_measurement_patch)
         self.manual_measurement_dialog.show()
         self.manual_measurement_dialog.raise_()
         self.manual_measurement_dialog.activateWindow()

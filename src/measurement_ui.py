@@ -356,8 +356,6 @@ class ReportDialog(QDialog):
 
 
 class ManualMeasurementDialog(QDialog):
-    patch_requested = Signal(int, int, int, str)
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manual Measurement")
@@ -366,38 +364,37 @@ class ManualMeasurementDialog(QDialog):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
         layout.addWidget(_heading("Manual Measurement"))
-        layout.addWidget(_hint("Show any RGB patch, take individual readings, and build a custom measurement list."))
+        layout.addWidget(_hint(
+            "Measure any external target and build a custom reading list. "
+            "This window does not control the patch shown by the app."
+        ))
 
-        instrument_row = QHBoxLayout()
-        instrument_row.addWidget(QLabel("Instrument"))
+        setup = QGroupBox("Measurement")
+        setup_form = QFormLayout(setup)
         self.instrument = QComboBox()
         self.instrument.addItems(("All connected instruments",) + tuple(item[0] for item in PREVIEW_INSTRUMENTS))
-        instrument_row.addWidget(self.instrument, 1)
-        layout.addLayout(instrument_row)
+        self.measurement_name = QLineEdit()
+        self.measurement_name.setPlaceholderText("Optional — Measurement 1, Measurement 2…")
+        setup_form.addRow("Instrument", self.instrument)
+        setup_form.addRow("Name", self.measurement_name)
+        layout.addWidget(setup)
 
-        patch_group = QGroupBox("Patch")
-        patch_layout = QHBoxLayout(patch_group)
-        self.rgb_spins = []
-        for label_text, value in (("R", 128), ("G", 128), ("B", 128)):
-            patch_layout.addWidget(QLabel(label_text))
-            spin = QSpinBox()
-            spin.setRange(0, 255)
-            spin.setValue(value)
-            self.rgb_spins.append(spin)
-            patch_layout.addWidget(spin)
-        patch_layout.addSpacing(10)
-        show = QPushButton("Show Patch")
+        measure_row = QHBoxLayout()
+        self.measure_status = QLabel("Ready — UI preview")
+        self.measure_status.setStyleSheet("color: #888;")
+        measure_row.addWidget(self.measure_status, 1)
         measure = QPushButton("Measure")
-        patch_layout.addWidget(show)
-        patch_layout.addWidget(measure)
-        layout.addWidget(patch_group)
+        measure.setDefault(True)
+        measure_row.addWidget(measure)
+        layout.addLayout(measure_row)
 
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(("Name", "R", "G", "B", "Y", "x", "y", "Instrument"))
+        self.table = QTableWidget(0, 9)
+        self.table.setHorizontalHeaderLabels(("Name", "Time", "X", "Y", "Z", "x", "y", "Instrument", "Status"))
         self.table.verticalHeader().setVisible(False)
         for column in range(7):
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table, 1)
 
         delete = QPushButton("Delete Selected")
@@ -409,24 +406,27 @@ class ManualMeasurementDialog(QDialog):
         save.clicked.connect(lambda: QMessageBox.information(self, "UI Preview", "CSV export is not connected yet."))
         close.clicked.connect(self.close)
         layout.addLayout(_button_row(delete, clear, save, close))
-        show.clicked.connect(self._show_patch)
         measure.clicked.connect(self._add_preview_reading)
 
-    def _rgb(self):
-        return tuple(spin.value() for spin in self.rgb_spins)
-
-    def _show_patch(self):
-        rgb = self._rgb()
-        self.patch_requested.emit(*rgb, f"Manual RGB {rgb[0]},{rgb[1]},{rgb[2]}")
-
     def _add_preview_reading(self):
-        self._show_patch()
-        rgb = self._rgb()
         row = self.table.rowCount()
         self.table.insertRow(row)
-        values = (f"Patch {row + 1}", *rgb, "48.0000", "0.312700", "0.329000", self.instrument.currentText())
+        name = self.measurement_name.text().strip() or f"Measurement {row + 1}"
+        values = (
+            name,
+            "20:15:32",
+            "45.7231",
+            "48.0000",
+            "52.2814",
+            "0.312700",
+            "0.329000",
+            self.instrument.currentText(),
+            "Preview",
+        )
         for column, value in enumerate(values):
             self.table.setItem(row, column, QTableWidgetItem(str(value)))
+        self.measurement_name.clear()
+        self.measure_status.setText("Preview reading added. External target was not changed.")
 
     def _delete_selected(self):
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
