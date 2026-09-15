@@ -496,7 +496,7 @@ class ManualMeasurementDialog(QDialog):
         display_row.addWidget(QLabel("Display"))
         self.display_mode_group = QButtonGroup(self)
         self.display_mode_group.setExclusive(True)
-        for mode in ("Yxy", "Yuv", "XYZ", "RGB8", "RGB"):
+        for mode in ("Yxy", "Yuv", "XYZ"):
             button = QPushButton(mode)
             button.setCheckable(True)
             button.setChecked(mode == self._display_mode)
@@ -630,8 +630,6 @@ class ManualMeasurementDialog(QDialog):
             "Yxy": ("Y", "x", "y"),
             "Yuv": ("Y", "u′", "v′"),
             "XYZ": ("X", "Y", "Z"),
-            "RGB8": ("R8", "G8", "B8"),
-            "RGB": ("R", "G", "B"),
         }[self._display_mode]
         headers = ("#", "Time", *value_headers, "Instrument", "Status")
         self.table.setColumnCount(len(headers))
@@ -655,8 +653,6 @@ class ManualMeasurementDialog(QDialog):
                     )
                 else:
                     values = (f"{reading.Y:.6f}", "0.000000", "0.000000")
-            else:
-                values = ("—", "—", "—")
             cells = (
                 row + 1,
                 record["time"],
