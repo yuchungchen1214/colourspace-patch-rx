@@ -15,6 +15,8 @@ from functools import partial
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from measurement_ui import CorrectionDialog, ManualMeasurementDialog, ReportDialog
+
 # ===== Third Party =====
 from PySide6.QtCore import (
     Qt,
@@ -2083,6 +2085,9 @@ class MainWindow(QMainWindow):
         self.log_dialog = None
         self.shortcuts_dialog = None
         self.connected_devices_dialog = None
+        self.correction_dialog = None
+        self.report_dialog = None
+        self.manual_measurement_dialog = None
         self.sync_seen_devices = {}
 
         self.viewer_windows = {}
@@ -2193,7 +2198,10 @@ class MainWindow(QMainWindow):
         sync_menu = menu_bar.addMenu("Sync")
         bridge_menu = menu_bar.addMenu("Bridge")
         view_menu = menu_bar.addMenu("Viewer")
+        measurement_menu = menu_bar.addMenu("Measurement")
         help_menu = menu_bar.addMenu("Help")
+
+        self._build_measurement_menu(measurement_menu)
 
         self.settings_action = QAction("Connection Settings…", self)
         self.settings_action.setMenuRole(QAction.MenuRole.NoRole)
@@ -3338,6 +3346,136 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.position_custom_color_panel()
+
+    def _build_measurement_menu(self, measurement_menu):
+        argyll_menu = measurement_menu.addMenu("ArgyllCMS")
+
+        self.argyll_status_action = QAction("Status: UI Preview", self)
+        self.argyll_status_action.setEnabled(False)
+        argyll_menu.addAction(self.argyll_status_action)
+        argyll_menu.addSeparator()
+
+        locate_argyll_action = QAction("Locate Automatically", self)
+        locate_argyll_action.triggered.connect(
+            lambda: self._show_measurement_preview_notice(
+                "ArgyllCMS",
+                "Automatic discovery will be connected after the interface is approved.",
+            )
+        )
+        argyll_menu.addAction(locate_argyll_action)
+
+        select_argyll_action = QAction("Select Installation…", self)
+        select_argyll_action.triggered.connect(
+            lambda: self._show_measurement_preview_notice(
+                "ArgyllCMS",
+                "Manual ArgyllCMS path selection is reserved for the functional phase.",
+            )
+        )
+        argyll_menu.addAction(select_argyll_action)
+
+        install_argyll_action = QAction("Download / Install…", self)
+        install_argyll_action.triggered.connect(
+            lambda: self._show_measurement_preview_notice(
+                "ArgyllCMS",
+                "The guided download and installation page is not connected in this UI preview.",
+            )
+        )
+        argyll_menu.addAction(install_argyll_action)
+
+        reveal_argyll_action = QAction("Reveal Installation", self)
+        reveal_argyll_action.setEnabled(False)
+        argyll_menu.addAction(reveal_argyll_action)
+
+        instruments_menu = measurement_menu.addMenu("Instruments")
+        scan_instruments_action = QAction("Scan Again", self)
+        scan_instruments_action.triggered.connect(
+            lambda: self._show_measurement_preview_notice(
+                "Instruments",
+                "Instrument scanning will be connected to ArgyllCMS in the functional phase.",
+            )
+        )
+        instruments_menu.addAction(scan_instruments_action)
+
+        connected_instruments_action = QAction("Connected Instruments…", self)
+        connected_instruments_action.triggered.connect(
+            lambda: self._show_measurement_preview_notice(
+                "Connected Instruments",
+                "The two entries below are preview devices based on the instruments used in testing.",
+            )
+        )
+        instruments_menu.addAction(connected_instruments_action)
+        instruments_menu.addSeparator()
+
+        preview_i1d3 = QAction("✓ X-Rite i1 DisplayPro  [I1-18.B-02.312611.09]", self)
+        preview_i1d3.setEnabled(False)
+        instruments_menu.addAction(preview_i1d3)
+        preview_colormunki = QAction("✓ X-Rite ColorMunki  [01-d63ce21e00001e]", self)
+        preview_colormunki.setEnabled(False)
+        instruments_menu.addAction(preview_colormunki)
+        instruments_menu.addSeparator()
+
+        driver_status_action = QAction("Driver Status…", self)
+        driver_status_action.triggered.connect(
+            lambda: self._show_measurement_preview_notice(
+                "Driver Status",
+                "Platform-specific driver diagnostics will appear here.",
+            )
+        )
+        instruments_menu.addAction(driver_status_action)
+
+        install_drivers_action = QAction("Install Required Drivers…", self)
+        install_drivers_action.triggered.connect(
+            lambda: self._show_measurement_preview_notice(
+                "Install Required Drivers",
+                "Driver installation will only be offered when required by the current platform.",
+            )
+        )
+        instruments_menu.addAction(install_drivers_action)
+
+        measurement_menu.addSeparator()
+
+        correction_action = QAction("Correction…", self)
+        correction_action.triggered.connect(self.open_correction_dialog)
+        measurement_menu.addAction(correction_action)
+
+        report_action = QAction("Report…", self)
+        report_action.triggered.connect(self.open_report_dialog)
+        measurement_menu.addAction(report_action)
+
+        manual_action = QAction("Manual Measurement…", self)
+        manual_action.triggered.connect(self.open_manual_measurement_dialog)
+        measurement_menu.addAction(manual_action)
+
+    def _show_measurement_preview_notice(self, title, message):
+        QMessageBox.information(self, title, message)
+
+    def _show_measurement_patch(self, r, g, b, label):
+        self.set_test_pattern_solid(r, g, b, label)
+        self.logger.log(f"[MEASUREMENT PREVIEW] {label}: RGB=({r},{g},{b})")
+
+    def open_correction_dialog(self):
+        if self.correction_dialog is None:
+            self.correction_dialog = CorrectionDialog(self)
+            self.correction_dialog.patch_requested.connect(self._show_measurement_patch)
+        self.correction_dialog.show()
+        self.correction_dialog.raise_()
+        self.correction_dialog.activateWindow()
+
+    def open_report_dialog(self):
+        if self.report_dialog is None:
+            self.report_dialog = ReportDialog(self)
+            self.report_dialog.patch_requested.connect(self._show_measurement_patch)
+        self.report_dialog.show()
+        self.report_dialog.raise_()
+        self.report_dialog.activateWindow()
+
+    def open_manual_measurement_dialog(self):
+        if self.manual_measurement_dialog is None:
+            self.manual_measurement_dialog = ManualMeasurementDialog(self)
+            self.manual_measurement_dialog.patch_requested.connect(self._show_measurement_patch)
+        self.manual_measurement_dialog.show()
+        self.manual_measurement_dialog.raise_()
+        self.manual_measurement_dialog.activateWindow()
 
     def open_settings_dialog(self):
         dc_host = self.settings.value(SETTINGS_KEY_DISPLAYCAL_HOST, DEFAULT_DISPLAYCAL_HOST)
