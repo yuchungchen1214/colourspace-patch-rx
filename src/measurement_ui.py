@@ -25,12 +25,6 @@ from PySide6.QtWidgets import (
 )
 
 
-PREVIEW_INSTRUMENTS = (
-    ("X-Rite i1 DisplayPro, ColorMunki Display", "I1-18.B-02.312611.09", "Ready"),
-    ("X-Rite ColorMunki", "01-d63ce21e00001e", "Calibration required"),
-)
-
-
 def _heading(text: str) -> QLabel:
     label = QLabel(text)
     label.setStyleSheet("color: #ddd; font-size: 13px; font-weight: bold;")
@@ -67,6 +61,20 @@ def _combo(items) -> QComboBox:
     combo.setView(view)
     combo.addItems(items)
     return combo
+
+
+def _instrument_label(instrument) -> str:
+    identifier = getattr(instrument, "display_identifier", "")
+    return f"{instrument.name}[{identifier}]" if identifier else instrument.name
+
+
+def _clear_layout(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget() is not None:
+            item.widget().deleteLater()
+        if item.layout() is not None:
+            _clear_layout(item.layout())
 
 
 class CorrectionDialog(QDialog):
@@ -134,23 +142,14 @@ class CorrectionDialog(QDialog):
 
         instruments = QGroupBox("Instruments")
         instrument_layout = QVBoxLayout(instruments)
+        self.instrument_list_layout = QVBoxLayout()
+        instrument_layout.addLayout(self.instrument_list_layout)
         self.instrument_checks = []
-        for index, (name, serial, status) in enumerate(PREVIEW_INSTRUMENTS):
-            row = QHBoxLayout()
-            check = QCheckBox(name)
-            check.setChecked(True)
-            self.instrument_checks.append(check)
-            row.addWidget(check, 1)
-            serial_label = QLabel(serial)
-            serial_label.setStyleSheet("color: #888;")
-            row.addWidget(serial_label)
-            status_label = QLabel(status)
-            status_label.setStyleSheet("color: #888;")
-            status_label.setMinimumWidth(125)
-            row.addWidget(status_label)
-            instrument_layout.addLayout(row)
+        self.instrument_placeholder = QLabel("Scanning instruments…")
+        self.instrument_placeholder.setStyleSheet("color: #888;")
+        self.instrument_list_layout.addWidget(self.instrument_placeholder)
         scan = QPushButton("Scan Again")
-        scan.clicked.connect(lambda: self.status_label.setText("Instrument scan preview refreshed."))
+        self.scan_button = scan
         instrument_layout.addLayout(_button_row(scan))
         layout.addWidget(instruments)
 
@@ -188,6 +187,28 @@ class CorrectionDialog(QDialog):
         layout.addWidget(output)
         layout.addStretch()
         return page
+
+    def set_scan_callback(self, callback):
+        try:
+            self.scan_button.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.scan_button.clicked.connect(callback)
+
+    def set_instruments(self, instruments):
+        _clear_layout(self.instrument_list_layout)
+        self.instrument_checks = []
+        if not instruments:
+            label = QLabel("No compatible instruments found")
+            label.setStyleSheet("color: #888;")
+            self.instrument_list_layout.addWidget(label)
+            return
+        for instrument in instruments:
+            check = QCheckBox(_instrument_label(instrument))
+            check.setChecked(True)
+            check.instrument_info = instrument
+            self.instrument_checks.append(check)
+            self.instrument_list_layout.addWidget(check)
 
     def _build_measure_tab(self) -> QWidget:
         page = QWidget()
@@ -338,12 +359,12 @@ class CorrectionDialog(QDialog):
             "W": (117.20, .3230, .3343),
         }
         row = 0
-        selected = [item for item, check in zip(PREVIEW_INSTRUMENTS, self.instrument_checks) if check.isChecked()]
+        selected = [check.instrument_info for check in self.instrument_checks if check.isChecked()]
         self.results_table.setRowCount(len(selected) * 4)
-        for instrument_index, (instrument, _serial, _status) in enumerate(selected):
+        for instrument_index, instrument in enumerate(selected):
             for patch, values in preview.items():
                 scale = 1.0 - instrument_index * .035
-                cells = (instrument, patch, f"{values[0] * scale:.4f}", f"{values[1]:.6f}", f"{values[2]:.6f}", "Preview")
+                cells = (_instrument_label(instrument), patch, f"{values[0] * scale:.4f}", f"{values[1]:.6f}", f"{values[2]:.6f}", "Preview")
                 for column, value in enumerate(cells):
                     self.results_table.setItem(row, column, QTableWidgetItem(value))
                 row += 1
@@ -372,11 +393,11 @@ class ReportDialog(QDialog):
         form = QFormLayout()
         display = QLineEdit()
         display.setPlaceholderText("Optional")
-        instrument = _combo(item[0] for item in PREVIEW_INSTRUMENTS)
+        self.instrument = _combo(("Scanning instruments…",))
         report_type = _combo(("Quick — RGBW", "Standard — Greyscale and gamut", "Custom…"))
         standard = _combo(("Rec.709 / sRGB", "Display P3", "DCI-P3", "Rec.2020"))
         form.addRow("Display name", display)
-        form.addRow("Instrument", instrument)
+        form.addRow("Instrument", self.instrument)
         form.addRow("Report type", report_type)
         form.addRow("Target", standard)
         layout.addLayout(form)
@@ -403,6 +424,15 @@ class ReportDialog(QDialog):
         close.clicked.connect(self.close)
         layout.addLayout(_button_row(self.clear_button, start, self.export_button, close))
 
+    def set_instruments(self, instruments):
+        self.instrument.clear()
+        if instruments:
+            self.instrument.addItems(_instrument_label(item) for item in instruments)
+            self.instrument.setEnabled(True)
+        else:
+            self.instrument.addItem("No compatible instruments found")
+            self.instrument.setEnabled(False)
+
     def _clear_report(self):
         self.preview_title.setText("No report yet")
         self.export_button.setEnabled(False)
@@ -421,7 +451,9 @@ class ManualMeasurementDialog(QDialog):
 
         setup = QGroupBox("Measurement")
         setup_form = QFormLayout(setup)
-        self.instrument = _combo(("All connected instruments",) + tuple(item[0] for item in PREVIEW_INSTRUMENTS))
+        self.instrument = _combo(("Scanning instruments…",))
+        self.instrument.setEnabled(False)
+        self._instruments = []
         setup_form.addRow("Instrument", self.instrument)
         layout.addWidget(setup)
 
@@ -457,7 +489,7 @@ class ManualMeasurementDialog(QDialog):
     def _add_preview_reading(self):
         selected_text = self.instrument.currentText()
         if selected_text == "All connected instruments":
-            instruments = [item[0] for item in PREVIEW_INSTRUMENTS]
+            instruments = [_instrument_label(item) for item in self._instruments]
         else:
             instruments = [selected_text]
 
@@ -478,6 +510,19 @@ class ManualMeasurementDialog(QDialog):
         self.measure_status.setText(
             f"{count} preview reading{'s' if count != 1 else ''} added. External target was not changed."
         )
+
+    def set_instruments(self, instruments):
+        self._instruments = list(instruments)
+        self.instrument.clear()
+        if self._instruments:
+            self.instrument.addItem("All connected instruments")
+            self.instrument.addItems(_instrument_label(item) for item in self._instruments)
+            self.instrument.setEnabled(True)
+            self.measure_status.setText(f"Ready — {len(self._instruments)} instrument(s) connected")
+        else:
+            self.instrument.addItem("No compatible instruments found")
+            self.instrument.setEnabled(False)
+            self.measure_status.setText("No compatible instruments found")
 
     def _delete_selected(self):
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)

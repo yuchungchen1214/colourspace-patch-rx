@@ -16,6 +16,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from measurement_ui import CorrectionDialog, ManualMeasurementDialog, ReportDialog
+from measurement import ArgyllEnvironment
 
 # ===== Third Party =====
 from PySide6.QtCore import (
@@ -28,6 +29,7 @@ from PySide6.QtCore import (
     QIODevice,
     QObject,
     QEvent,
+    QUrl,
 )
 
 from PySide6.QtGui import (
@@ -41,6 +43,7 @@ from PySide6.QtGui import (
     QShortcut,
     QKeySequence,
     QPixmap,
+    QDesktopServices,
 )
 
 from PySide6.QtWidgets import (
@@ -2090,8 +2093,13 @@ class MainWindow(QMainWindow):
         self.manual_measurement_dialog = None
         self.sync_seen_devices = {}
 
+        self.measurement_environment = ArgyllEnvironment(self.settings, self.logger, self)
+        self.measurement_environment.scan_started.connect(self._on_argyll_scan_started)
+        self.measurement_environment.scan_finished.connect(self._on_argyll_scan_finished)
+
         self.viewer_windows = {}
         self._build_menu(show_status=show_status)
+        QTimer.singleShot(0, self.measurement_environment.scan)
         self._update_token_display()
         self._update_bridge_port_display()
         self._update_connected_target_display()
@@ -3350,27 +3358,17 @@ class MainWindow(QMainWindow):
     def _build_measurement_menu(self, measurement_menu):
         argyll_menu = measurement_menu.addMenu("ArgyllCMS")
 
-        self.argyll_status_action = QAction("Status: UI Preview", self)
+        self.argyll_status_action = QAction("Status: Scanning…", self)
         self.argyll_status_action.setEnabled(False)
         argyll_menu.addAction(self.argyll_status_action)
         argyll_menu.addSeparator()
 
-        locate_argyll_action = QAction("Locate Automatically", self)
-        locate_argyll_action.triggered.connect(
-            lambda: self._show_measurement_preview_notice(
-                "ArgyllCMS",
-                "Automatic discovery will be connected after the interface is approved.",
-            )
-        )
-        argyll_menu.addAction(locate_argyll_action)
+        self.locate_argyll_action = QAction("Locate Automatically", self)
+        self.locate_argyll_action.triggered.connect(lambda: self.measurement_environment.scan(force_auto=True))
+        argyll_menu.addAction(self.locate_argyll_action)
 
         select_argyll_action = QAction("Select Installation…", self)
-        select_argyll_action.triggered.connect(
-            lambda: self._show_measurement_preview_notice(
-                "ArgyllCMS",
-                "Manual ArgyllCMS path selection is reserved for the functional phase.",
-            )
-        )
+        select_argyll_action.triggered.connect(self._select_argyll_installation)
         argyll_menu.addAction(select_argyll_action)
 
         install_argyll_action = QAction("Download / Install…", self)
@@ -3382,37 +3380,21 @@ class MainWindow(QMainWindow):
         )
         argyll_menu.addAction(install_argyll_action)
 
-        reveal_argyll_action = QAction("Reveal Installation", self)
-        reveal_argyll_action.setEnabled(False)
-        argyll_menu.addAction(reveal_argyll_action)
+        self.reveal_argyll_action = QAction("Reveal Installation", self)
+        self.reveal_argyll_action.setEnabled(False)
+        self.reveal_argyll_action.triggered.connect(self._reveal_argyll_installation)
+        argyll_menu.addAction(self.reveal_argyll_action)
 
-        instruments_menu = measurement_menu.addMenu("Instruments")
-        scan_instruments_action = QAction("Scan Again", self)
-        scan_instruments_action.triggered.connect(
-            lambda: self._show_measurement_preview_notice(
-                "Instruments",
-                "Instrument scanning will be connected to ArgyllCMS in the functional phase.",
-            )
-        )
-        instruments_menu.addAction(scan_instruments_action)
+        self.instruments_menu = measurement_menu.addMenu("Instruments")
+        self.scan_instruments_action = QAction("Scan Again", self)
+        self.scan_instruments_action.triggered.connect(self.measurement_environment.scan)
+        self.instruments_menu.addAction(self.scan_instruments_action)
 
         connected_instruments_action = QAction("Connected Instruments…", self)
-        connected_instruments_action.triggered.connect(
-            lambda: self._show_measurement_preview_notice(
-                "Connected Instruments",
-                "The two entries below are preview devices based on the instruments used in testing.",
-            )
-        )
-        instruments_menu.addAction(connected_instruments_action)
-        instruments_menu.addSeparator()
-
-        preview_i1d3 = QAction("✓ X-Rite i1 DisplayPro  [I1-18.B-02.312611.09]", self)
-        preview_i1d3.setEnabled(False)
-        instruments_menu.addAction(preview_i1d3)
-        preview_colormunki = QAction("✓ X-Rite ColorMunki  [01-d63ce21e00001e]", self)
-        preview_colormunki.setEnabled(False)
-        instruments_menu.addAction(preview_colormunki)
-        instruments_menu.addSeparator()
+        connected_instruments_action.triggered.connect(self._show_connected_measurement_instruments)
+        self.instruments_menu.addAction(connected_instruments_action)
+        self.instrument_actions_separator = self.instruments_menu.addSeparator()
+        self.measurement_instrument_actions = []
 
         driver_status_action = QAction("Driver Status…", self)
         driver_status_action.triggered.connect(
@@ -3421,7 +3403,7 @@ class MainWindow(QMainWindow):
                 "Platform-specific driver diagnostics will appear here.",
             )
         )
-        instruments_menu.addAction(driver_status_action)
+        self.instruments_menu.addAction(driver_status_action)
 
         install_drivers_action = QAction("Install Required Drivers…", self)
         install_drivers_action.triggered.connect(
@@ -3430,7 +3412,7 @@ class MainWindow(QMainWindow):
                 "Driver installation will only be offered when required by the current platform.",
             )
         )
-        instruments_menu.addAction(install_drivers_action)
+        self.instruments_menu.addAction(install_drivers_action)
 
         measurement_menu.addSeparator()
 
@@ -3445,6 +3427,78 @@ class MainWindow(QMainWindow):
         manual_action = QAction("Manual Measurement…", self)
         manual_action.triggered.connect(self.open_manual_measurement_dialog)
         measurement_menu.addAction(manual_action)
+
+    def _on_argyll_scan_started(self):
+        self.argyll_status_action.setText("Status: Scanning…")
+        self.locate_argyll_action.setEnabled(False)
+        self.scan_instruments_action.setEnabled(False)
+
+    def _on_argyll_scan_finished(self, info, instruments):
+        self.locate_argyll_action.setEnabled(True)
+        self.scan_instruments_action.setEnabled(True)
+        self.reveal_argyll_action.setEnabled(info.spotread is not None)
+
+        if info.spotread is None:
+            self.argyll_status_action.setText("Status: Not Found")
+        elif info.error:
+            self.argyll_status_action.setText("Status: Error")
+        else:
+            version = f" {info.version}" if info.version else ""
+            self.argyll_status_action.setText(f"Status: ArgyllCMS{version} — Ready")
+
+        for action in self.measurement_instrument_actions:
+            self.instruments_menu.removeAction(action)
+            action.deleteLater()
+        self.measurement_instrument_actions = []
+
+        if instruments:
+            for instrument in instruments:
+                identifier = instrument.display_identifier
+                action = QAction(f"✓ {instrument.name}  [{identifier}]", self)
+                action.setEnabled(False)
+                self.instruments_menu.insertAction(self.instrument_actions_separator, action)
+                self.measurement_instrument_actions.append(action)
+        else:
+            action = QAction("No compatible instruments found", self)
+            action.setEnabled(False)
+            self.instruments_menu.insertAction(self.instrument_actions_separator, action)
+            self.measurement_instrument_actions.append(action)
+
+        for dialog in (
+                self.correction_dialog,
+                self.report_dialog,
+                self.manual_measurement_dialog,
+        ):
+            if dialog is not None:
+                dialog.set_instruments(instruments)
+
+    def _select_argyll_installation(self):
+        current = self.measurement_environment.info.spotread
+        initial = str(current.parent if current else Path.home())
+        executable, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select ArgyllCMS spotread",
+            initial,
+            "spotread (spotread spotread.exe);;All Files (*)",
+        )
+        if executable:
+            self.measurement_environment.set_spotread(Path(executable))
+
+    def _reveal_argyll_installation(self):
+        spotread = self.measurement_environment.info.spotread
+        if spotread is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(spotread.parent)))
+
+    def _show_connected_measurement_instruments(self):
+        instruments = self.measurement_environment.instruments
+        if not instruments:
+            message = "No compatible instruments found."
+        else:
+            message = "\n".join(
+                f"{index}. {instrument.name}\n   {instrument.display_identifier}"
+                for index, instrument in enumerate(instruments, 1)
+            )
+        QMessageBox.information(self, "Connected Instruments", message)
 
     def _show_measurement_preview_notice(self, title, message):
         QMessageBox.information(self, title, message)
@@ -3465,6 +3519,8 @@ class MainWindow(QMainWindow):
         if self.correction_dialog is None:
             self.correction_dialog = CorrectionDialog()
             self.correction_dialog.patch_requested.connect(self._show_measurement_patch)
+            self.correction_dialog.set_scan_callback(self.measurement_environment.scan)
+        self.correction_dialog.set_instruments(self.measurement_environment.instruments)
         self.correction_dialog.show()
         self.correction_dialog.raise_()
         self.correction_dialog.activateWindow()
@@ -3473,6 +3529,7 @@ class MainWindow(QMainWindow):
         if self.report_dialog is None:
             self.report_dialog = ReportDialog()
             self.report_dialog.patch_requested.connect(self._show_measurement_patch)
+        self.report_dialog.set_instruments(self.measurement_environment.instruments)
         self.report_dialog.show()
         self.report_dialog.raise_()
         self.report_dialog.activateWindow()
@@ -3480,6 +3537,7 @@ class MainWindow(QMainWindow):
     def open_manual_measurement_dialog(self):
         if self.manual_measurement_dialog is None:
             self.manual_measurement_dialog = ManualMeasurementDialog()
+        self.manual_measurement_dialog.set_instruments(self.measurement_environment.instruments)
         self.manual_measurement_dialog.show()
         self.manual_measurement_dialog.raise_()
         self.manual_measurement_dialog.activateWindow()
