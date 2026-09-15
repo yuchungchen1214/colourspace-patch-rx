@@ -1,3 +1,6 @@
+import csv
+from datetime import datetime
+
 from PySide6.QtCore import Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -439,6 +442,8 @@ class ReportDialog(QDialog):
 
 
 class ManualMeasurementDialog(QDialog):
+    measurement_requested = Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manual Measurement")
@@ -458,12 +463,12 @@ class ManualMeasurementDialog(QDialog):
         layout.addWidget(setup)
 
         measure_row = QHBoxLayout()
-        self.measure_status = QLabel("Ready — UI preview")
+        self.measure_status = QLabel("Ready")
         self.measure_status.setStyleSheet("color: #888;")
         measure_row.addWidget(self.measure_status, 1)
-        measure = QPushButton("Measure")
-        measure.setDefault(True)
-        measure_row.addWidget(measure)
+        self.measure_button = QPushButton("Measure")
+        self.measure_button.setDefault(True)
+        measure_row.addWidget(self.measure_button)
         layout.addLayout(measure_row)
 
         self.table = QTableWidget(0, 9)
@@ -481,35 +486,61 @@ class ManualMeasurementDialog(QDialog):
         close = QPushButton("Close")
         delete.clicked.connect(self._delete_selected)
         clear.clicked.connect(self._clear_readings)
-        save.clicked.connect(lambda: QMessageBox.information(self, "UI Preview", "CSV export is not connected yet."))
+        save.clicked.connect(self._save_csv)
         close.clicked.connect(self.close)
         layout.addLayout(_button_row(delete, clear, save, close))
-        measure.clicked.connect(self._add_preview_reading)
+        self.measure_button.clicked.connect(self._request_measurement)
 
-    def _add_preview_reading(self):
-        selected_text = self.instrument.currentText()
-        if selected_text == "All connected instruments":
-            instruments = [_instrument_label(item) for item in self._instruments]
+    def _request_measurement(self):
+        if not self._instruments:
+            QMessageBox.warning(self, "No Instrument", "No compatible instruments are connected.")
+            return
+        if self.instrument.currentIndex() == 0:
+            selected = list(self._instruments)
         else:
-            instruments = [selected_text]
+            selected = [self._instruments[self.instrument.currentIndex() - 1]]
+        self.measurement_requested.emit(selected)
 
-        preview_values = (
-            ("45.7231", "48.0000", "52.2814", "0.312700", "0.329000"),
-            ("44.1768", "46.3200", "50.4102", "0.313418", "0.328742"),
-        )
-        time_text = QTime.currentTime().toString("HH:mm:ss")
-        for index, instrument in enumerate(instruments):
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            xyzxy = preview_values[index % len(preview_values)]
-            values = (row + 1, time_text, *xyzxy, instrument, "Preview")
-            for column, value in enumerate(values):
-                self.table.setItem(row, column, QTableWidgetItem(str(value)))
+    def set_busy(self, busy: bool, count: int = 0):
+        self.measure_button.setEnabled(not busy and bool(self._instruments))
+        self.instrument.setEnabled(not busy and bool(self._instruments))
+        if busy:
+            self.measure_status.setText(f"Measuring {count} instrument(s)…")
 
-        count = len(instruments)
-        self.measure_status.setText(
-            f"{count} preview reading{'s' if count != 1 else ''} added. External target was not changed."
+    def add_reading(self, instrument, reading):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        values = (
+            row + 1,
+            QTime.currentTime().toString("HH:mm:ss"),
+            f"{reading.X:.6f}",
+            f"{reading.Y:.6f}",
+            f"{reading.Z:.6f}",
+            f"{reading.x:.6f}",
+            f"{reading.y:.6f}",
+            _instrument_label(instrument),
+            "Measured",
         )
+        for column, value in enumerate(values):
+            self.table.setItem(row, column, QTableWidgetItem(str(value)))
+        self.measure_status.setText(f"Reading received from {instrument.name}")
+
+    def add_error(self, instrument, message: str):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        values = (
+            row + 1,
+            QTime.currentTime().toString("HH:mm:ss"),
+            "", "", "", "", "",
+            _instrument_label(instrument),
+            f"Error: {message}",
+        )
+        for column, value in enumerate(values):
+            self.table.setItem(row, column, QTableWidgetItem(str(value)))
+
+    def measurement_finished(self):
+        self.set_busy(False)
+        self.measure_status.setText("Ready")
 
     def set_instruments(self, instruments):
         self._instruments = list(instruments)
@@ -518,10 +549,12 @@ class ManualMeasurementDialog(QDialog):
             self.instrument.addItem("All connected instruments")
             self.instrument.addItems(_instrument_label(item) for item in self._instruments)
             self.instrument.setEnabled(True)
+            self.measure_button.setEnabled(True)
             self.measure_status.setText(f"Ready — {len(self._instruments)} instrument(s) connected")
         else:
             self.instrument.addItem("No compatible instruments found")
             self.instrument.setEnabled(False)
+            self.measure_button.setEnabled(False)
             self.measure_status.setText("No compatible instruments found")
 
     def _delete_selected(self):
@@ -531,4 +564,24 @@ class ManualMeasurementDialog(QDialog):
 
     def _clear_readings(self):
         self.table.setRowCount(0)
-        self.measure_status.setText("Ready — UI preview")
+        self.measure_status.setText("Ready")
+
+    def _save_csv(self):
+        if self.table.rowCount() == 0:
+            QMessageBox.information(self, "No Measurements", "There are no readings to save.")
+            return
+        default_name = f"manual_measurements_{datetime.now():%Y%m%d_%H%M}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Save Measurements", default_name, "CSV Files (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(self.table.horizontalHeaderItem(column).text() for column in range(self.table.columnCount()))
+            for row in range(self.table.rowCount()):
+                writer.writerow(
+                    self.table.item(row, column).text() if self.table.item(row, column) else ""
+                    for column in range(self.table.columnCount())
+                )
+        self.measure_status.setText(f"Saved {self.table.rowCount()} reading(s)")

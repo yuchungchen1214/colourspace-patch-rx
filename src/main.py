@@ -16,7 +16,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from measurement_ui import CorrectionDialog, ManualMeasurementDialog, ReportDialog
-from measurement import ArgyllEnvironment
+from measurement import ArgyllEnvironment, ManualMeasurementController
 
 # ===== Third Party =====
 from PySide6.QtCore import (
@@ -2096,6 +2096,17 @@ class MainWindow(QMainWindow):
         self.measurement_environment = ArgyllEnvironment(self.settings, self.logger, self)
         self.measurement_environment.scan_started.connect(self._on_argyll_scan_started)
         self.measurement_environment.scan_finished.connect(self._on_argyll_scan_finished)
+        self.manual_measurement_controller = ManualMeasurementController(
+            self.measurement_environment, self.logger, self
+        )
+        self.manual_measurement_controller.started.connect(self._on_manual_measurement_started)
+        self.manual_measurement_controller.calibration_required.connect(self._on_manual_calibration_required)
+        self.manual_measurement_controller.measurement_position_required.connect(
+            self._on_manual_measurement_position_required
+        )
+        self.manual_measurement_controller.reading_ready.connect(self._on_manual_reading_ready)
+        self.manual_measurement_controller.measurement_error.connect(self._on_manual_measurement_error)
+        self.manual_measurement_controller.finished.connect(self._on_manual_measurement_finished)
 
         self.viewer_windows = {}
         self._build_menu(show_status=show_status)
@@ -3537,10 +3548,60 @@ class MainWindow(QMainWindow):
     def open_manual_measurement_dialog(self):
         if self.manual_measurement_dialog is None:
             self.manual_measurement_dialog = ManualMeasurementDialog()
+            self.manual_measurement_dialog.measurement_requested.connect(self._start_manual_measurement)
         self.manual_measurement_dialog.set_instruments(self.measurement_environment.instruments)
         self.manual_measurement_dialog.show()
         self.manual_measurement_dialog.raise_()
         self.manual_measurement_dialog.activateWindow()
+
+    def _start_manual_measurement(self, instruments):
+        if not self.manual_measurement_controller.measure(instruments):
+            QMessageBox.warning(
+                self.manual_measurement_dialog,
+                "Measurement Unavailable",
+                "ArgyllCMS is unavailable or another manual measurement is still running.",
+            )
+
+    def _on_manual_measurement_started(self, count):
+        if self.manual_measurement_dialog is not None:
+            self.manual_measurement_dialog.set_busy(True, count)
+
+    def _manual_measurement_prompt(self, title, message):
+        result = QMessageBox.question(
+            self.manual_measurement_dialog,
+            title,
+            message,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if result == QMessageBox.StandardButton.Ok:
+            self.manual_measurement_controller.continue_current()
+        else:
+            self.manual_measurement_controller.cancel_current()
+
+    def _on_manual_calibration_required(self, instrument):
+        self._manual_measurement_prompt(
+            "Instrument Calibration",
+            f"Set {instrument.name} to its calibration position, then click OK.",
+        )
+
+    def _on_manual_measurement_position_required(self, instrument):
+        self._manual_measurement_prompt(
+            "Measurement Position",
+            f"Return {instrument.name} to its measurement position and aim it at the target, then click OK.",
+        )
+
+    def _on_manual_reading_ready(self, instrument, reading):
+        if self.manual_measurement_dialog is not None:
+            self.manual_measurement_dialog.add_reading(instrument, reading)
+
+    def _on_manual_measurement_error(self, instrument, message):
+        if self.manual_measurement_dialog is not None:
+            self.manual_measurement_dialog.add_error(instrument, message)
+
+    def _on_manual_measurement_finished(self):
+        if self.manual_measurement_dialog is not None:
+            self.manual_measurement_dialog.measurement_finished()
 
     def open_settings_dialog(self):
         dc_host = self.settings.value(SETTINGS_KEY_DISPLAYCAL_HOST, DEFAULT_DISPLAYCAL_HOST)
