@@ -238,14 +238,14 @@ class CorrectionDialog(QDialog):
         return page
 
     def _choose_output(self):
-        dialog = QFileDialog(self, "Choose Output Folder", self.output_path.text())
-        dialog.setFileMode(QFileDialog.FileMode.Directory)
-        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            paths = dialog.selectedFiles()
-            if paths:
-                self.output_path.setText(paths[0])
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Output Folder",
+            self.output_path.text(),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if path:
+            self.output_path.setText(path)
 
     def _start_preview(self):
         if not any(check.isChecked() for check in self.instrument_checks):
