@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListView,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -56,6 +57,16 @@ def _button_row(*buttons: QPushButton) -> QHBoxLayout:
     for button in buttons:
         row.addWidget(button)
     return row
+
+
+def _combo(items) -> QComboBox:
+    """Use a stable list popup instead of the animated macOS menu popup."""
+    combo = QComboBox()
+    view = QListView(combo)
+    view.setUniformItemSizes(True)
+    combo.setView(view)
+    combo.addItems(items)
+    return combo
 
 
 class CorrectionDialog(QDialog):
@@ -142,8 +153,7 @@ class CorrectionDialog(QDialog):
 
         patch = QGroupBox("Patch")
         form = QFormLayout(patch)
-        self.range_combo = QComboBox()
-        self.range_combo.addItems(("Full Range", "Legal", "Extended"))
+        self.range_combo = _combo(("Full Range", "Legal", "Extended"))
         self.level_spin = QSpinBox()
         self.level_spin.setRange(1, 255)
         self.level_spin.setValue(242)
@@ -322,12 +332,9 @@ class ReportDialog(QDialog):
         form = QFormLayout()
         display = QLineEdit()
         display.setPlaceholderText("Optional")
-        instrument = QComboBox()
-        instrument.addItems(item[0] for item in PREVIEW_INSTRUMENTS)
-        report_type = QComboBox()
-        report_type.addItems(("Quick — RGBW", "Standard — Greyscale and gamut", "Custom…"))
-        standard = QComboBox()
-        standard.addItems(("Rec.709 / sRGB", "Display P3", "DCI-P3", "Rec.2020"))
+        instrument = _combo(item[0] for item in PREVIEW_INSTRUMENTS)
+        report_type = _combo(("Quick — RGBW", "Standard — Greyscale and gamut", "Custom…"))
+        standard = _combo(("Rec.709 / sRGB", "Display P3", "DCI-P3", "Rec.2020"))
         form.addRow("Display name", display)
         form.addRow("Instrument", instrument)
         form.addRow("Report type", report_type)
@@ -364,19 +371,12 @@ class ManualMeasurementDialog(QDialog):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
         layout.addWidget(_heading("Manual Measurement"))
-        layout.addWidget(_hint(
-            "Measure any external target and build a custom reading list. "
-            "This window does not control the patch shown by the app."
-        ))
+        layout.addWidget(_hint("Measure an external target and save its readings."))
 
         setup = QGroupBox("Measurement")
         setup_form = QFormLayout(setup)
-        self.instrument = QComboBox()
-        self.instrument.addItems(("All connected instruments",) + tuple(item[0] for item in PREVIEW_INSTRUMENTS))
-        self.measurement_name = QLineEdit()
-        self.measurement_name.setPlaceholderText("Optional — Measurement 1, Measurement 2…")
+        self.instrument = _combo(("All connected instruments",) + tuple(item[0] for item in PREVIEW_INSTRUMENTS))
         setup_form.addRow("Instrument", self.instrument)
-        setup_form.addRow("Name", self.measurement_name)
         layout.addWidget(setup)
 
         measure_row = QHBoxLayout()
@@ -389,7 +389,7 @@ class ManualMeasurementDialog(QDialog):
         layout.addLayout(measure_row)
 
         self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(("Name", "Time", "X", "Y", "Z", "x", "y", "Instrument", "Status"))
+        self.table.setHorizontalHeaderLabels(("#", "Time", "X", "Y", "Z", "x", "y", "Instrument", "Status"))
         self.table.verticalHeader().setVisible(False)
         for column in range(7):
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
@@ -411,9 +411,8 @@ class ManualMeasurementDialog(QDialog):
     def _add_preview_reading(self):
         row = self.table.rowCount()
         self.table.insertRow(row)
-        name = self.measurement_name.text().strip() or f"Measurement {row + 1}"
         values = (
-            name,
+            row + 1,
             "20:15:32",
             "45.7231",
             "48.0000",
@@ -425,7 +424,6 @@ class ManualMeasurementDialog(QDialog):
         )
         for column, value in enumerate(values):
             self.table.setItem(row, column, QTableWidgetItem(str(value)))
-        self.measurement_name.clear()
         self.measure_status.setText("Preview reading added. External target was not changed.")
 
     def _delete_selected(self):
