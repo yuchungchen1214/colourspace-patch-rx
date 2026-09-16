@@ -1,6 +1,9 @@
+# Copyright (C) 2026 WhARTS Ltd. — SPDX-License-Identifier: AGPL-3.0-or-later
+
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -13,6 +16,7 @@ from PySide6.QtCore import QObject, Signal
 
 
 SETTINGS_KEY_ARGYLL_SPOTREAD = "measurement/argyll_spotread"
+SETTINGS_KEY_ARGYLL_USE_BUNDLED = "measurement/argyll_use_bundled"
 
 
 @dataclass(frozen=True)
@@ -31,19 +35,49 @@ class InstrumentInfo:
 
     @property
     def display_identifier(self) -> str:
-        return self.identifier or self.path.split(":", 1)[0]
+        if self.identifier:
+            return self.identifier
+        if sys.platform == "win32":
+            # Windows Argyll paths such as hid:/9 and hid:/26 need the full
+            # path component to distinguish otherwise identical instruments.
+            return self.path.split(" (", 1)[0]
+        return self.path.split(":", 1)[0]
 
 
 def _executable_name() -> str:
     return "spotread.exe" if sys.platform == "win32" else "spotread"
 
 
-def candidate_paths(saved_path: str = "") -> list[Path]:
+def bundled_spotread_path() -> Path | None:
+    if sys.platform != "darwin" or platform.machine().lower() not in ("arm64", "aarch64"):
+        return None
+
+    roots = []
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        roots.append(Path(bundle_root) / "argyll")
+    roots.append(
+        Path(__file__).resolve().parents[2]
+        / "vendor" / "argyll" / "macos-arm64" / "bin"
+    )
+    for root in roots:
+        candidate = root / "spotread"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def candidate_paths(saved_path: str = "", prefer_bundled: bool = True) -> list[Path]:
     name = _executable_name()
     candidates: list[Path] = []
+    bundled = bundled_spotread_path()
+    if prefer_bundled and bundled is not None:
+        candidates.append(bundled)
     if saved_path:
         saved = Path(saved_path).expanduser()
         candidates.append(saved / name if saved.is_dir() else saved)
+    if not prefer_bundled and bundled is not None:
+        candidates.append(bundled)
 
     home = Path.home()
     if sys.platform == "darwin":
@@ -98,7 +132,10 @@ def inspect_spotread(spotread: Path, timeout: float = 15.0) -> tuple[str, list[I
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        output = (exc.stdout or "") + (exc.stderr or "")
+        def decoded(value):
+            return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+
+        output = decoded(exc.stdout) + decoded(exc.stderr)
         return "", _parse_instruments(output), "Instrument scan timed out."
     except OSError as exc:
         return "", [], str(exc)
@@ -122,7 +159,7 @@ def _parse_instruments(output: str) -> list[InstrumentInfo]:
     for match in re.finditer(r"^\s*(\d+)\s*=\s*'([^']+)'\s*$", output, re.M):
         port = int(match.group(1))
         path = match.group(2).strip()
-        if not re.match(r"^(?:hid|usb)\d+:", path, re.I):
+        if not re.match(r"^(?:(?:hid|usb)\d*:|libusb\d*[-:])", path, re.I):
             continue
         key = (port, path)
         if key in seen:
@@ -158,6 +195,7 @@ class ArgyllEnvironment(QObject):
 
     def set_spotread(self, path: Path):
         self.settings.setValue(SETTINGS_KEY_ARGYLL_SPOTREAD, str(path))
+        self.settings.setValue(SETTINGS_KEY_ARGYLL_USE_BUNDLED, False)
         self.scan()
 
     def update_identifier(self, instrument: InstrumentInfo, identifier: str):
@@ -175,8 +213,15 @@ class ArgyllEnvironment(QObject):
 
     def _scan_worker(self, force_auto: bool):
         try:
-            saved = "" if force_auto else str(self.settings.value(SETTINGS_KEY_ARGYLL_SPOTREAD, "") or "")
-            paths = candidate_paths(saved)
+            if force_auto:
+                self.settings.setValue(SETTINGS_KEY_ARGYLL_USE_BUNDLED, True)
+            prefer_bundled = bool(
+                self.settings.value(SETTINGS_KEY_ARGYLL_USE_BUNDLED, True, type=bool)
+            )
+            saved = "" if force_auto else str(
+                self.settings.value(SETTINGS_KEY_ARGYLL_SPOTREAD, "") or ""
+            )
+            paths = candidate_paths(saved, prefer_bundled=prefer_bundled)
             if not paths:
                 info = ArgyllInfo(None, error="ArgyllCMS was not found.")
                 instruments: list[InstrumentInfo] = []

@@ -11,6 +11,9 @@ build/
 dist/
 dist-macos-intel/
 *.spec
+!ColourSpace Patch Rx.spec
+dmg_temp/
+dmg_temp_intel/
 
 # macOS
 .DS_Store
@@ -23,11 +26,8 @@ dist-macos-intel/
 tools/
 src/archive
 
-# ignore build scripts
-build.sh
+# Legacy/local-only material
 build-dmg-intel.sh
-ColourSpace Patch Rx.spec
-README.md
 assets other
 build other
 manual other

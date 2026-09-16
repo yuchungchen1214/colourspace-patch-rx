@@ -1,5 +1,8 @@
+# Copyright (C) 2026 WhARTS Ltd. — SPDX-License-Identifier: AGPL-3.0-or-later
+
 # ===== Standard Library =====
 import sys
+import os
 import socket
 import struct
 import threading
@@ -35,6 +38,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QIcon,
     QAction,
+    QFontMetrics,
     QPainter,
     QColor,
     QImage,
@@ -65,14 +69,17 @@ from PySide6.QtWidgets import (
     QToolButton,
     QFileDialog,
     QSizePolicy,
+    QMenu,
 )
+
 
 APP_ORG = "WhARTS"
 APP_NAME = "ColourSpacePatchClient"
 APP_DISPLAY_NAME = "ColourSpace Patch Rx"
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0-beta.1"
 APP_YEAR = "2026"
 APP_COMPANY = "WhARTS Ltd."
+SETTINGS_KEY_INSTRUMENT_CORRECTIONS = "measurement/instrument_corrections"
 
 DEFAULT_HOST = "192.168.1.100"
 DEFAULT_PORT = 20002
@@ -109,7 +116,16 @@ WEB_VIEWER_SOURCE_MAP = {
 }
 
 # =====
-LOG_FILE = Path.home() / "Library" / "Logs" / "ColourSpacePatchClient.log"
+if sys.platform == "win32":
+    LOG_FILE = (
+        Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        / APP_ORG
+        / APP_NAME
+        / "Logs"
+        / "ColourSpacePatchClient.log"
+    )
+else:
+    LOG_FILE = Path.home() / "Library" / "Logs" / "ColourSpacePatchClient.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 SETTINGS_KEY_HOST = "connection/host"
@@ -148,6 +164,11 @@ SHORTCUT_HELP = [
     ("Add additional viewer", "⌘/Ctrl + N"),
     ("Close current viewer", "⌘/Ctrl + W"),
     ("Close all additional viewers", "⌘/Ctrl + Shift + W"),
+
+    ("Measurement", ""),
+    ("Open Correction", "⌘/Ctrl + Shift + C"),
+    ("Open Report", "⌘/Ctrl + Shift + R"),
+    ("Open Manual Measurement", "⌘/Ctrl + Shift + M"),
 
     ("Interface", ""),
     ("Show/Hide connected devices", "⌘/Ctrl + D"),
@@ -918,7 +939,7 @@ class CustomColorPanel(QFrame):
         spin.setRange(0, 255)
         spin.setValue(value)
         if sys.platform == "win32":
-            spin.setFixedWidth(80)
+            spin.setFixedWidth(100)
         else:
             spin.setFixedWidth(48)
 
@@ -1908,6 +1929,11 @@ class BridgeServerManager:
 
         self.logger.log("[BRIDGE] HTTP server stopped")
 
+    def stop_async(self):
+        if self._httpd is None:
+            return
+        threading.Thread(target=self.stop, daemon=True).start()
+
 
 class ViewerLabel(QLabel):
     def __init__(self):
@@ -2092,13 +2118,22 @@ class MainWindow(QMainWindow):
         self.report_dialog = None
         self.manual_measurement_dialog = None
         self.sync_seen_devices = {}
+        try:
+            self._instrument_corrections = json.loads(
+                str(self.settings.value(SETTINGS_KEY_INSTRUMENT_CORRECTIONS, "{}") or "{}")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self._instrument_corrections = {}
 
         self.measurement_environment = ArgyllEnvironment(self.settings, self.logger, self)
         self.measurement_environment.scan_started.connect(self._on_argyll_scan_started)
         self.measurement_environment.scan_finished.connect(self._on_argyll_scan_finished)
         self.measurement_environment.instruments_changed.connect(self._update_measurement_instrument_ui)
         self.manual_measurement_controller = ManualMeasurementController(
-            self.measurement_environment, self.logger, self
+            self.measurement_environment,
+            self.logger,
+            self,
+            correction_provider=self._active_correction_path,
         )
         self.manual_measurement_controller.started.connect(self._on_manual_measurement_started)
         self.manual_measurement_controller.calibration_required.connect(self._on_manual_calibration_required)
@@ -2112,7 +2147,9 @@ class MainWindow(QMainWindow):
             self.measurement_environment.update_identifier
         )
         self._measurement_owner = None
+        self._manual_target_rgb = None
         self._correction_state = None
+        self._report_state = None
 
         self.viewer_windows = {}
         self._build_menu(show_status=show_status)
@@ -3388,62 +3425,42 @@ class MainWindow(QMainWindow):
         select_argyll_action.triggered.connect(self._select_argyll_installation)
         argyll_menu.addAction(select_argyll_action)
 
-        install_argyll_action = QAction("Download / Install…", self)
-        install_argyll_action.triggered.connect(
-            lambda: self._show_measurement_preview_notice(
-                "ArgyllCMS",
-                "The guided download and installation page is not connected in this UI preview.",
-            )
-        )
-        argyll_menu.addAction(install_argyll_action)
-
         self.reveal_argyll_action = QAction("Reveal Installation", self)
         self.reveal_argyll_action.setEnabled(False)
         self.reveal_argyll_action.triggered.connect(self._reveal_argyll_installation)
         argyll_menu.addAction(self.reveal_argyll_action)
 
         self.instruments_menu = measurement_menu.addMenu("Instruments")
-        self.scan_instruments_action = QAction("Scan Again", self)
+        self.scan_instruments_action = QAction("Scan Instruments", self)
         self.scan_instruments_action.triggered.connect(self._rescan_measurement_environment)
         self.instruments_menu.addAction(self.scan_instruments_action)
 
-        connected_instruments_action = QAction("Connected Instruments…", self)
-        connected_instruments_action.triggered.connect(self._show_connected_measurement_instruments)
-        self.instruments_menu.addAction(connected_instruments_action)
         self.instrument_actions_separator = self.instruments_menu.addSeparator()
         self.measurement_instrument_actions = []
 
-        driver_status_action = QAction("Driver Status…", self)
-        driver_status_action.triggered.connect(
-            lambda: self._show_measurement_preview_notice(
-                "Driver Status",
-                "Platform-specific driver diagnostics will appear here.",
-            )
-        )
-        self.instruments_menu.addAction(driver_status_action)
-
-        install_drivers_action = QAction("Install Required Drivers…", self)
-        install_drivers_action.triggered.connect(
-            lambda: self._show_measurement_preview_notice(
-                "Install Required Drivers",
-                "Driver installation will only be offered when required by the current platform.",
-            )
-        )
-        self.instruments_menu.addAction(install_drivers_action)
-
         measurement_menu.addSeparator()
 
-        correction_action = QAction("Correction…", self)
-        correction_action.triggered.connect(self.open_correction_dialog)
-        measurement_menu.addAction(correction_action)
+        self.correction_action = QAction("Correction…", self)
+        self.correction_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        self.correction_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.correction_action.triggered.connect(self.open_correction_dialog)
+        measurement_menu.addAction(self.correction_action)
 
-        report_action = QAction("Report…", self)
-        report_action.triggered.connect(self.open_report_dialog)
-        measurement_menu.addAction(report_action)
+        self.report_action = QAction("Report…", self)
+        self.report_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.report_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.report_action.triggered.connect(self.open_report_dialog)
+        measurement_menu.addAction(self.report_action)
 
-        manual_action = QAction("Manual Measurement…", self)
-        manual_action.triggered.connect(self.open_manual_measurement_dialog)
-        measurement_menu.addAction(manual_action)
+        self.manual_measurement_action = QAction("Manual Measurement…", self)
+        self.manual_measurement_action.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        self.manual_measurement_action.setShortcutContext(
+            Qt.ShortcutContext.ApplicationShortcut
+        )
+        self.manual_measurement_action.triggered.connect(
+            self.open_manual_measurement_dialog
+        )
+        measurement_menu.addAction(self.manual_measurement_action)
 
     def _on_argyll_scan_started(self):
         self.argyll_status_action.setText("Status: Scanning…")
@@ -3464,33 +3481,198 @@ class MainWindow(QMainWindow):
             self.argyll_status_action.setText(f"Status: ArgyllCMS{version} — Ready")
 
         self._update_measurement_instrument_ui(instruments)
+        if self.correction_dialog is not None:
+            self.correction_dialog.set_argyll_spotread(info.spotread)
+
+    @staticmethod
+    def _instrument_correction_keys(instrument):
+        keys = []
+        if instrument.identifier:
+            keys.append(f"id:{instrument.identifier}")
+        keys.append(f"path:{instrument.path}")
+        return keys
+
+    def _instrument_correction_state(self, instrument):
+        for key in self._instrument_correction_keys(instrument):
+            state = self._instrument_corrections.get(key)
+            if isinstance(state, dict):
+                return dict(state)
+        return {"path": "", "enabled": False}
+
+    def _save_instrument_correction_state(self, instrument, state):
+        clean = {
+            "path": str(state.get("path", "") or ""),
+            "enabled": bool(state.get("enabled", False)),
+        }
+        for key in self._instrument_correction_keys(instrument):
+            self._instrument_corrections[key] = clean
+        self.settings.setValue(
+            SETTINGS_KEY_INSTRUMENT_CORRECTIONS,
+            json.dumps(self._instrument_corrections, ensure_ascii=False),
+        )
+
+    def _active_correction_path(self, instrument):
+        state = self._instrument_correction_state(instrument)
+        path = Path(state.get("path", "")).expanduser() if state.get("path") else None
+        if state.get("enabled") and path is not None and path.is_file():
+            return path
+        return None
+
+    def _correction_status_text(self, instrument):
+        state = self._instrument_correction_state(instrument)
+        path_text = state.get("path", "")
+        if not path_text:
+            return "Raw"
+        path = Path(path_text).expanduser()
+        if not path.is_file():
+            return f"Raw — Missing: {path.name}"
+        if state.get("enabled"):
+            return f"Corrected: {path.name}"
+        return f"Raw — Selected: {path.name}"
+
+    def _correction_summary_text(self, instrument):
+        return "Corrected" if self._active_correction_path(instrument) is not None else "Raw"
+
+    @staticmethod
+    def _compact_instrument_menu_name(name):
+        compact = str(name).split(",", 1)[0].strip()
+        for prefix in ("X-Rite ", "Datacolor "):
+            if compact.startswith(prefix):
+                compact = compact[len(prefix):]
+                break
+        return compact or str(name)
+
+    @staticmethod
+    def _elided_menu_text(text, menu, maximum_width=420):
+        return QFontMetrics(menu.font()).elidedText(
+            str(text), Qt.TextElideMode.ElideMiddle, maximum_width
+        )
+
+    def _choose_instrument_correction(self, instrument, enable_after=False):
+        if self.manual_measurement_controller.busy:
+            if self.manual_measurement_dialog is not None:
+                self.manual_measurement_dialog.show_warning(
+                    "Finish the current measurement before changing correction settings."
+                )
+            self._update_measurement_instrument_ui(self.measurement_environment.instruments)
+            return False
+        state = self._instrument_correction_state(instrument)
+        current = state.get("path", "")
+        start = str(Path(current).expanduser().parent) if current else str(Path.home())
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select CCMX Correction",
+            start,
+            "Colorimeter Correction Matrix (*.ccmx);;All Files (*)",
+        )
+        if not selected:
+            self._update_measurement_instrument_ui(self.measurement_environment.instruments)
+            return False
+        state["path"] = selected
+        if enable_after:
+            state["enabled"] = True
+        self._save_instrument_correction_state(instrument, state)
+        self._correction_settings_changed()
+        return True
+
+    def _toggle_instrument_correction(self, instrument, enabled):
+        if self.manual_measurement_controller.busy:
+            if self.manual_measurement_dialog is not None:
+                self.manual_measurement_dialog.show_warning(
+                    "Finish the current measurement before changing correction settings."
+                )
+            self._update_measurement_instrument_ui(self.measurement_environment.instruments)
+            return
+        state = self._instrument_correction_state(instrument)
+        if enabled and not state.get("path"):
+            self._choose_instrument_correction(instrument, enable_after=True)
+            return
+        path = Path(state.get("path", "")).expanduser() if state.get("path") else None
+        if enabled and (path is None or not path.is_file()):
+            state["enabled"] = False
+            self._save_instrument_correction_state(instrument, state)
+            if self.manual_measurement_dialog is not None:
+                self.manual_measurement_dialog.show_warning(
+                    "The selected CCMX file could not be found."
+                )
+            self._update_measurement_instrument_ui(self.measurement_environment.instruments)
+            return
+        state["enabled"] = bool(enabled)
+        self._save_instrument_correction_state(instrument, state)
+        self._correction_settings_changed()
+
+    def _correction_settings_changed(self):
+        self.manual_measurement_controller.release_sessions()
+        self._update_measurement_instrument_ui(self.measurement_environment.instruments)
+        if self.manual_measurement_dialog is not None and self.manual_measurement_dialog.isVisible():
+            self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
 
     def _update_measurement_instrument_ui(self, instruments):
+        self.instruments_menu.setToolTipsVisible(True)
         for action in self.measurement_instrument_actions:
+            submenu = action.menu()
             self.instruments_menu.removeAction(action)
             action.deleteLater()
+            if submenu is not None:
+                submenu.deleteLater()
         self.measurement_instrument_actions = []
 
         if instruments:
             for instrument in instruments:
                 identifier = instrument.display_identifier
-                action = QAction(f"✓ {instrument.name}  [{identifier}]", self)
-                action.setEnabled(False)
-                self.instruments_menu.insertAction(self.instrument_actions_separator, action)
-                self.measurement_instrument_actions.append(action)
+                status_text = self._correction_summary_text(instrument)
+                full_instrument_text = (
+                    f"{instrument.name}  [{identifier}] — {status_text}"
+                )
+                compact_instrument_text = (
+                    f"{self._compact_instrument_menu_name(instrument.name)} "
+                    f"[{identifier}] — {status_text}"
+                )
+                submenu = QMenu(self.instruments_menu)
+                submenu.setTitle(self._elided_menu_text(
+                    compact_instrument_text, self.instruments_menu
+                ))
+                submenu.setToolTipsVisible(True)
+                state = self._instrument_correction_state(instrument)
+                correction_path = Path(state.get("path", "")).expanduser() if state.get("path") else None
+                available = correction_path is not None and correction_path.is_file()
+                apply_action = QAction("Apply Correction", submenu)
+                apply_action.setCheckable(True)
+                apply_action.setChecked(bool(state.get("enabled")) and available)
+                apply_action.triggered.connect(
+                    lambda checked, item=instrument: self._toggle_instrument_correction(item, checked)
+                )
+                submenu.addAction(apply_action)
+                select_action = QAction("Select CCMX…", submenu)
+                select_action.triggered.connect(
+                    lambda _checked=False, item=instrument: self._choose_instrument_correction(item)
+                )
+                submenu.addAction(select_action)
+                full_correction_text = (
+                    f"Current: {self._correction_status_text(instrument)}"
+                )
+                current_action = QAction(
+                    self._elided_menu_text(full_correction_text, submenu), submenu
+                )
+                current_action.setToolTip(full_correction_text)
+                current_action.setEnabled(False)
+                submenu.addAction(current_action)
+                menu_action = self.instruments_menu.insertMenu(
+                    self.instrument_actions_separator, submenu
+                )
+                menu_action.setToolTip(full_instrument_text)
+                self.measurement_instrument_actions.append(menu_action)
         else:
             action = QAction("No compatible instruments found", self)
             action.setEnabled(False)
             self.instruments_menu.insertAction(self.instrument_actions_separator, action)
             self.measurement_instrument_actions.append(action)
 
-        for dialog in (
-                self.correction_dialog,
-                self.report_dialog,
-                self.manual_measurement_dialog,
-        ):
+        for dialog in (self.correction_dialog, self.report_dialog):
             if dialog is not None:
                 dialog.set_instruments(instruments)
+        if self.manual_measurement_dialog is not None:
+            self.manual_measurement_dialog.set_instruments(instruments)
 
     def _rescan_measurement_environment(self, force_auto=False):
         if self.manual_measurement_controller.busy:
@@ -3521,20 +3703,6 @@ class MainWindow(QMainWindow):
         if spotread is not None:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(spotread.parent)))
 
-    def _show_connected_measurement_instruments(self):
-        instruments = self.measurement_environment.instruments
-        if not instruments:
-            message = "No compatible instruments found."
-        else:
-            message = "\n".join(
-                f"{index}. {instrument.name}\n   {instrument.display_identifier}"
-                for index, instrument in enumerate(instruments, 1)
-            )
-        QMessageBox.information(self, "Connected Instruments", message)
-
-    def _show_measurement_preview_notice(self, title, message):
-        QMessageBox.information(self, title, message)
-
     def _show_measurement_patch(self, r, g, b, label):
         # Measurement-generated patches use the existing Local Custom Color state.
         # Keep the panel values aligned without moving keyboard focus away from
@@ -3549,14 +3717,16 @@ class MainWindow(QMainWindow):
 
     def open_correction_dialog(self):
         if self.correction_dialog is None:
-            self.correction_dialog = CorrectionDialog()
+            self.correction_dialog = CorrectionDialog(settings=self.settings)
             self.correction_dialog.patch_requested.connect(self._show_measurement_patch)
             self.correction_dialog.measurement_requested.connect(self._start_correction_measurement)
             self.correction_dialog.continue_requested.connect(self.manual_measurement_controller.continue_current)
             self.correction_dialog.cancel_requested.connect(self.manual_measurement_controller.cancel_current)
             self.correction_dialog.set_scan_callback(self._rescan_measurement_environment)
             self.correction_dialog.finished.connect(self._schedule_measurement_session_release)
+        self.manual_measurement_controller.set_corrections_enabled(False)
         self.correction_dialog.set_instruments(self.measurement_environment.instruments)
+        self.correction_dialog.set_argyll_spotread(self.measurement_environment.info.spotread)
         self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
         self.correction_dialog.show()
         self.correction_dialog.raise_()
@@ -3565,10 +3735,24 @@ class MainWindow(QMainWindow):
     def open_report_dialog(self):
         if self.report_dialog is None:
             self.report_dialog = ReportDialog()
+            self.report_dialog.set_correction_status_provider(
+                self._correction_status_text
+            )
             self.report_dialog.patch_requested.connect(self._show_measurement_patch)
+            self.report_dialog.measurement_requested.connect(self._start_report_measurement)
+            self.report_dialog.remeasure_requested.connect(self._start_report_remeasurement)
+            self.report_dialog.pause_requested.connect(self._set_report_paused)
+            self.report_dialog.stop_requested.connect(self._stop_report_measurement)
+            self.report_dialog.continue_requested.connect(
+                self.manual_measurement_controller.continue_current
+            )
+            self.report_dialog.cancel_requested.connect(
+                self.manual_measurement_controller.cancel_current
+            )
+            self.report_dialog.set_scan_callback(self._rescan_measurement_environment)
             self.report_dialog.finished.connect(self._schedule_measurement_session_release)
+        self.manual_measurement_controller.set_corrections_enabled(True)
         self.report_dialog.set_instruments(self.measurement_environment.instruments)
-        self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
         self.report_dialog.show()
         self.report_dialog.raise_()
         self.report_dialog.activateWindow()
@@ -3576,7 +3760,13 @@ class MainWindow(QMainWindow):
     def open_manual_measurement_dialog(self):
         if self.manual_measurement_dialog is None:
             self.manual_measurement_dialog = ManualMeasurementDialog()
+            self.manual_measurement_dialog.set_correction_status_provider(
+                self._correction_status_text
+            )
             self.manual_measurement_dialog.measurement_requested.connect(self._start_manual_measurement)
+            self.manual_measurement_dialog.set_scan_callback(
+                self._rescan_measurement_environment
+            )
             self.manual_measurement_dialog.continue_requested.connect(
                 self.manual_measurement_controller.continue_current
             )
@@ -3584,6 +3774,7 @@ class MainWindow(QMainWindow):
                 self.manual_measurement_controller.cancel_current
             )
             self.manual_measurement_dialog.finished.connect(self._schedule_measurement_session_release)
+        self.manual_measurement_controller.set_corrections_enabled(True)
         self.manual_measurement_dialog.set_instruments(self.measurement_environment.instruments)
         self.manual_measurement_controller.prepare(self.measurement_environment.instruments)
         self.manual_measurement_dialog.show()
@@ -3591,21 +3782,41 @@ class MainWindow(QMainWindow):
         self.manual_measurement_dialog.activateWindow()
 
     def _start_manual_measurement(self, instruments):
+        if self.manual_measurement_controller.busy:
+            if self.manual_measurement_dialog is not None:
+                self.manual_measurement_dialog.show_warning(
+                    "A measurement is already in progress."
+                )
+            return
+        self.manual_measurement_controller.set_corrections_enabled(True)
         self._measurement_owner = "manual"
+        display_state = self.get_display_state_snapshot()
+        solid_rgb = display_state.get("solid_rgb")
+        self._manual_target_rgb = (
+            tuple(max(0, min(255, int(value))) for value in solid_rgb)
+            if display_state.get("mode") == "solid"
+            and isinstance(solid_rgb, (list, tuple))
+            and len(solid_rgb) == 3
+            else None
+        )
         if not self.manual_measurement_controller.measure(instruments):
             self._measurement_owner = None
-            QMessageBox.warning(
-                self.manual_measurement_dialog,
-                "Measurement Unavailable",
-                "ArgyllCMS is unavailable or another manual measurement is still running.",
-            )
+            self._manual_target_rgb = None
+            if self.manual_measurement_dialog is not None:
+                self.manual_measurement_dialog.show_warning(
+                    "ArgyllCMS is unavailable."
+                )
 
     def _on_manual_measurement_started(self, count):
         if self._measurement_owner == "manual" and self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.set_busy(True, count)
 
     def _on_manual_calibration_required(self, instrument):
-        dialog = self.correction_dialog if self._measurement_owner == "correction" else self.manual_measurement_dialog
+        dialog = {
+            "correction": self.correction_dialog,
+            "report": self.report_dialog,
+            "manual": self.manual_measurement_dialog,
+        }.get(self._measurement_owner)
         if dialog is None:
             self.manual_measurement_controller.cancel_current()
             return
@@ -3615,7 +3826,11 @@ class MainWindow(QMainWindow):
         )
 
     def _on_manual_measurement_position_required(self, instrument):
-        dialog = self.correction_dialog if self._measurement_owner == "correction" else self.manual_measurement_dialog
+        dialog = {
+            "correction": self.correction_dialog,
+            "report": self.report_dialog,
+            "manual": self.manual_measurement_dialog,
+        }.get(self._measurement_owner)
         if dialog is None:
             self.manual_measurement_controller.cancel_current()
             return
@@ -3627,33 +3842,218 @@ class MainWindow(QMainWindow):
     def _on_manual_reading_ready(self, instrument, reading):
         if self._measurement_owner == "correction" and self.correction_dialog is not None:
             state = self._correction_state
-            self.correction_dialog.add_reading(state["colours"][state["colour_index"]], state["repetition"], instrument, reading)
-        elif self.manual_measurement_dialog is not None:
-            self.manual_measurement_dialog.add_reading(instrument, reading)
+            role = state["targets"][state["result_index"]][0]
+            state["result_index"] += 1
+            self.correction_dialog.add_reading(
+                state["colours"][state["colour_index"]],
+                state["repetition"], role, instrument, reading,
+            )
+        elif self._measurement_owner == "report" and self.report_dialog is not None:
+            state = self._report_state
+            self.report_dialog.add_reading(
+                state["index"], reading, self._active_correction_path(instrument)
+            )
+        elif self._measurement_owner == "manual" and self.manual_measurement_dialog is not None:
+            self.manual_measurement_dialog.add_reading(
+                instrument,
+                reading,
+                self._manual_target_rgb,
+                self._active_correction_path(instrument),
+            )
 
     def _on_manual_measurement_error(self, instrument, message):
         if self._measurement_owner == "correction" and self.correction_dialog is not None:
             state = self._correction_state
-            self.correction_dialog.add_error(state["colours"][state["colour_index"]], state["repetition"], instrument, message)
-        elif self.manual_measurement_dialog is not None:
+            role = state["targets"][state["result_index"]][0]
+            state["result_index"] += 1
+            self.correction_dialog.add_error(
+                state["colours"][state["colour_index"]],
+                state["repetition"], role, instrument, message,
+            )
+            state["failed"] = message
+        elif self._measurement_owner == "report" and self.report_dialog is not None:
+            self._report_state["failed"] = message
+            self.report_dialog.add_error(self._report_state["index"], message)
+        elif self._measurement_owner == "manual" and self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.add_error(instrument, message)
 
     def _on_manual_measurement_finished(self):
         if self._measurement_owner == "correction":
             self._advance_correction_measurement()
             return
-        if self.manual_measurement_dialog is not None:
+        if self._measurement_owner == "report":
+            self._advance_report_measurement()
+            return
+        if self._measurement_owner == "manual" and self.manual_measurement_dialog is not None:
             self.manual_measurement_dialog.measurement_finished()
         self._measurement_owner = None
+        self._manual_target_rgb = None
         self._schedule_measurement_session_release()
+
+    def _start_report_measurement(self, instrument):
+        if self.manual_measurement_controller.busy:
+            if self.report_dialog is not None:
+                self.report_dialog.status_label.setText("A measurement is already in progress.")
+            return
+        self.manual_measurement_controller.set_corrections_enabled(True)
+        self._measurement_owner = "report"
+        sequence = list(range(len(self.report_dialog.PATCHES)))
+        if not self.report_dialog.has_reading("Grey 255"):
+            white_index = next(
+                (
+                    index for index, (name, _rgb) in enumerate(self.report_dialog.PATCHES)
+                    if name == "Grey 255"
+                ),
+                None,
+            )
+            if white_index is not None:
+                sequence.insert(0, white_index)
+        self._report_state = {
+            "instrument": instrument,
+            "index": sequence[0],
+            "position": 0,
+            "sequence": sequence,
+            "failed": None,
+            "paused": False,
+            "stop_requested": False,
+            "single": False,
+        }
+        self.report_dialog.begin_report()
+        self._begin_report_patch()
+
+    def _start_report_remeasurement(self, index, instrument):
+        if self.manual_measurement_controller.busy:
+            self.report_dialog.status_label.setText("A measurement is already in progress.")
+            return
+        self.manual_measurement_controller.set_corrections_enabled(True)
+        self._measurement_owner = "report"
+        self._report_state = {
+            "instrument": instrument,
+            "index": int(index),
+            "position": 0,
+            "sequence": [int(index)],
+            "failed": None,
+            "paused": False,
+            "stop_requested": False,
+            "single": True,
+        }
+        self.report_dialog.begin_remeasurement(int(index))
+        self._begin_report_patch()
+
+    def _set_report_paused(self, paused):
+        state = self._report_state
+        if state is None or state.get("single"):
+            return
+        state["paused"] = bool(paused)
+        if paused:
+            state["pending_read"] = None
+            if not self.manual_measurement_controller.busy:
+                self.report_dialog.set_paused(state["position"], len(state["sequence"]))
+        if not paused and not self.manual_measurement_controller.busy:
+            self._begin_report_patch()
+
+    def _stop_report_measurement(self):
+        state = self._report_state
+        if state is None:
+            return
+        state["stop_requested"] = True
+        if self.manual_measurement_controller.busy:
+            self.manual_measurement_controller.cancel_current()
+            self.report_dialog.status_label.setText(
+                "Stopping after the current instrument operation…"
+            )
+            return
+        self.report_dialog.finish_report(
+            "Report stopped. Completed measurements were kept."
+        )
+        self._measurement_owner = None
+        self._report_state = None
+        self.manual_measurement_controller.release_sessions()
+        self._schedule_measurement_session_release()
+
+    def _begin_report_patch(self, expected_state=None):
+        state = self._report_state
+        if expected_state is not None and state is not expected_state:
+            return
+        if state is None or state.get("stop_requested") or state.get("paused"):
+            return
+        position = state["position"]
+        index = state["sequence"][position]
+        state["index"] = index
+        name, rgb = self.report_dialog.PATCHES[index]
+        self.report_dialog.begin_patch(index, position, len(state["sequence"]))
+        self._show_measurement_patch(*rgb, f"Report {name}")
+        token = object()
+        state["pending_read"] = token
+        QTimer.singleShot(300, lambda: self._measure_report_patch(state, token))
+
+    def _measure_report_patch(self, expected_state=None, token=None):
+        state = self._report_state
+        if state is None or self._measurement_owner != "report":
+            return
+        if expected_state is not None and (
+                state is not expected_state or state.get("pending_read") is not token):
+            return
+        if state.get("paused") or state.get("stop_requested"):
+            return
+        state["pending_read"] = None
+        if not self.manual_measurement_controller.measure([state["instrument"]]):
+            self.report_dialog.finish_report("ArgyllCMS is unavailable.")
+            self._measurement_owner = None
+            self._report_state = None
+            self._schedule_measurement_session_release()
+
+    def _advance_report_measurement(self):
+        state = self._report_state
+        if state is None:
+            return
+        if state.get("stop_requested") or self.manual_measurement_controller.cancelled:
+            self.report_dialog.finish_report("Report stopped. Completed measurements were kept.")
+            self._measurement_owner = None
+            self._report_state = None
+            self.manual_measurement_controller.release_sessions()
+            self._schedule_measurement_session_release()
+            return
+        if state.get("failed"):
+            self.report_dialog.finish_report(
+                f"Report stopped at the current patch. {state['failed']}"
+            )
+            self._measurement_owner = None
+            self._report_state = None
+            self._schedule_measurement_session_release()
+            return
+        if state.get("single"):
+            self.report_dialog.finish_report()
+            self._measurement_owner = None
+            self._report_state = None
+            self._schedule_measurement_session_release()
+            return
+        state["position"] += 1
+        if state["position"] >= len(state["sequence"]):
+            self.report_dialog.finish_report()
+            self._measurement_owner = None
+            self._report_state = None
+            self._schedule_measurement_session_release()
+            return
+        if state.get("paused"):
+            self.report_dialog.set_paused(
+                state["position"], len(state["sequence"])
+            )
+            return
+        QTimer.singleShot(100, lambda: self._begin_report_patch(state))
 
     def _start_correction_measurement(self, config):
         if self.manual_measurement_controller.busy:
             QMessageBox.information(self.correction_dialog, "Measurement in Progress", "Finish the current measurement first.")
             return
+        self.manual_measurement_controller.set_corrections_enabled(False)
         self._measurement_owner = "correction"
-        self._correction_state = dict(config, colour_index=0, repetition=1)
-        self.correction_dialog.begin_measurement(config["colours"])
+        self._correction_state = dict(
+            config, colour_index=0, repetition=1, result_index=0, failed=None
+        )
+        self.correction_dialog.begin_measurement(
+            config["colours"], config["targets"], config["repetitions"]
+        )
         self._begin_correction_patch()
 
     def _begin_correction_patch(self):
@@ -3663,7 +4063,9 @@ class MainWindow(QMainWindow):
         rgb = {"R": (level, 0, 0), "G": (0, level, 0), "B": (0, 0, level), "W": (level, level, level)}[colour]
         self.correction_dialog.begin_patch(colour, state["repetition"], state["repetitions"])
         self._show_measurement_patch(*rgb, f"Correction {colour}")
-        QTimer.singleShot(500, lambda: self.manual_measurement_controller.measure(state["instruments"]))
+        state["result_index"] = 0
+        instruments = [instrument for _role, instrument in state["targets"]]
+        QTimer.singleShot(500, lambda: self.manual_measurement_controller.measure(instruments))
 
     def _advance_correction_measurement(self):
         state = self._correction_state
@@ -3674,11 +4076,21 @@ class MainWindow(QMainWindow):
             self._measurement_owner = None
             self._correction_state = None
             return
+        if state.get("failed"):
+            message = state["failed"]
+            self.correction_dialog.fail_real_measurement(
+                f"Measurement stopped at the current patch. {message}"
+            )
+            self._measurement_owner = None
+            self._correction_state = None
+            return
         colour = state["colours"][state["colour_index"]]
         if state["repetition"] < state["repetitions"]:
             state["repetition"] += 1
             self.correction_dialog.begin_patch(colour, state["repetition"], state["repetitions"])
-            QTimer.singleShot(100, lambda: self.manual_measurement_controller.measure(state["instruments"]))
+            state["result_index"] = 0
+            instruments = [instrument for _role, instrument in state["targets"]]
+            QTimer.singleShot(100, lambda: self.manual_measurement_controller.measure(instruments))
             return
         self.correction_dialog.finish_real_patch(colour)
         state["colour_index"] += 1
@@ -4452,16 +4864,19 @@ class MainWindow(QMainWindow):
         ):
             if dialog is not None:
                 dialog.close()
-        self.manual_measurement_controller.release_sessions()
+        self.manual_measurement_controller.cancel_current()
+        self.manual_measurement_controller.shutdown()
         self.connection_manager.stop()
 
         if hasattr(self, "bridge_server"):
+            # Wait for the HTTP server thread to finish before Qt tears down
+            # QSettings and the rest of the application objects.
             self.bridge_server.stop()
 
             if hasattr(self.sync_manager, "presence_timer") and self.sync_manager.presence_timer:
                 self.sync_manager.presence_timer.stop()
 
-            self.sync_manager.stop_listener()
+            self.sync_manager.stop_listener(wait=False)
 
         QApplication.instance().quit()
         super().closeEvent(event)
@@ -4625,7 +5040,10 @@ class MainWindow(QMainWindow):
 
             desc = QLabel(
                 "© 2026 WhARTS Ltd.<br>"
-                "Compatible with ColourSpace by Light Illusion"
+                "Licensed under GNU AGPL v3 or later.<br>"
+                "Uses ArgyllCMS; see bundled third-party notices.<br>"
+                "Compatible with ColourSpace by Light Illusion.<br>"
+                "Not affiliated with or endorsed by Light Illusion."
             )
             desc.setTextFormat(Qt.TextFormat.RichText)
             desc.setStyleSheet("color:#888;")
@@ -5011,7 +5429,7 @@ class SyncManager(QObject):
         self._listener_thread = threading.Thread(target=loop, daemon=True)
         self._listener_thread.start()
 
-    def stop_listener(self):
+    def stop_listener(self, wait=True):
         self.mode = "off"
 
         sock = self._listener_socket
@@ -5024,7 +5442,7 @@ class SyncManager(QObject):
                 pass
 
         thread = self._listener_thread
-        if thread is not None and thread.is_alive():
+        if wait and thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
 
         self._listener_thread = None

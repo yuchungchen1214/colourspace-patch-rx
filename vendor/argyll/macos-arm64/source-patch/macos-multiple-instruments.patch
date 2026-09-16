@@ -1,0 +1,31 @@
+--- Argyll_V3.5.0.orig/spectro/usbio_ox.c
++++ Argyll_V3.5.0/spectro/usbio_ox.c
+@@ -162,10 +162,10 @@ int usb_get_paths(
+ 			/* If this device is HID, it will have already added to the paths list, */
+ 			/* so check for this and skip this device if it is already there. */
+ 			for (i = 0; i < p->ndpaths[dtix_combined]; i++) {
+-				if (p->dpaths[i][dtix_combined]->vid == vid
+-				 && p->dpaths[i][dtix_combined]->pid == pid
+-				 && p->dpaths[i][dtix_combined]->hidd != NULL
+-				 && p->dpaths[i][dtix_combined]->hidd->lid == lid) {
++				if (p->dpaths[dtix_combined][i]->vid == vid
++				 && p->dpaths[dtix_combined][i]->pid == pid
++				 && p->dpaths[dtix_combined][i]->hidd != NULL
++				 && p->dpaths[dtix_combined][i]->hidd->lid == lid) {
+ 					a1logd(p->log, 1, "usb_get_paths: Ignoring device because it is already in list as HID\n");
+ 					break;
+ 				}
+--- Argyll_V3.5.0.orig/spectro/hidio.c
++++ Argyll_V3.5.0/spectro/hidio.c
+@@ -321,11 +321,9 @@ int hid_get_paths(icompaths *p) {
+ 
+         	if ((vref = IOHIDDeviceGetProperty(ioob, CFSTR(kIOHIDVendorIDKey))) != NULL) {
+                 CFNumberGetValue(vref, kCFNumberSInt32Type, &vid);
+-				CFRelease(vref);
+             }
+         	if ((pref = IOHIDDeviceGetProperty(ioob, CFSTR(kIOHIDProductIDKey))) != NULL) {
+                 CFNumberGetValue(pref, kCFNumberSInt32Type, &pid);
+-				CFRelease(vref);
+             }
+ 			if ((lidpref = IOHIDDeviceGetProperty(ioob, CFSTR("LocationID"))) != NULL) {
+ 				CFNumberGetValue(lidpref, kCFNumberIntType, &lid);
