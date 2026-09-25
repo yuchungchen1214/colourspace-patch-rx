@@ -27,6 +27,6 @@ ColourSpace Patch Rx receives and displays patch data over the network, supporti
 - On first use, your system may require additional permissions or network settings to be adjusted for the app to receive data.
 ---
 ## License
-Copyright (C) 2026 WhARTS Ltd.
+Copyright © 2026 WhARTS Ltd.
 
 Licensed under the GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for license details and third-party notices.
