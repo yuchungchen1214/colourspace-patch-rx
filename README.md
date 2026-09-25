@@ -47,4 +47,4 @@ ColourSpace Patch Rx receives and displays patch data over the network, supporti
 
 ## License
 
-Currently not specified.
+Licensed under the GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for license details and third-party notices.
